@@ -1,8 +1,17 @@
+<<<<<<< HEAD
+=======
+version: '3.8'
+
+>>>>>>> a293d76a25d58fb62d19e65bdd1b76ac1f92656b
 services:
   # PostgreSQL Database
   postgres:
     image: postgres:17
+<<<<<<< HEAD
     container_name: transport-postgres
+=======
+    container_name: transport_db
+>>>>>>> a293d76a25d58fb62d19e65bdd1b76ac1f92656b
     environment:
       POSTGRES_DB: transport_db
       POSTGRES_USER: transport_user
@@ -20,14 +29,27 @@ services:
     networks:
       - transport_network
 
+<<<<<<< HEAD
   # Zookeeper
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
     container_name: transport-zookeeper
+=======
+  # Passenger Service
+  passenger-service:
+    build:
+      context: ./Smart-Public-Transport-Ticketing-System/PassengerService
+      dockerfile: Dockerfile
+    container_name: passenger_service
+>>>>>>> a293d76a25d58fb62d19e65bdd1b76ac1f92656b
     environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
+      - dbHost=postgres
+      - dbPort=5432
+      - dbName=transport_db
+      - dbUser=transport_user
+      - dbPassword=transport_pass
     ports:
+<<<<<<< HEAD
       - "2181:2181"
     networks:
       - transport_network
@@ -88,10 +110,22 @@ services:
         condition: service_started
     networks:
       - transport_network
+=======
+      - "9001:9001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - transport_network
+>>>>>>> a293d76a25d58fb62d19e65bdd1b76ac1f92656b
 
 volumes:
   postgres_data:
 
 networks:
   transport_network:
+<<<<<<< HEAD
     driver: bridge
+=======
+    driver: bridge
+>>>>>>> a293d76a25d58fb62d19e65bdd1b76ac1f92656b
