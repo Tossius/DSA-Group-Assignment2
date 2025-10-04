@@ -68,7 +68,7 @@ public type PaymentResponse record {
     string dbPassword = "password";
     string dbName = "transport_db";
     string kafkaBootStrap = "kafka:9092";
-    int httpPort=9094;
+    int httpPort=9004;
  };
 
  public function getConfig() returns PaymentConfig|error {
