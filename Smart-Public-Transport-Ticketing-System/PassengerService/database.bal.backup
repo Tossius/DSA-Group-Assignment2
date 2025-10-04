@@ -1,0 +1,59 @@
+import ballerinax/postgresql;
+import ballerina/sql;
+
+// Configuration variables
+public configurable string dbHost = "localhost";
+public configurable int dbPort = 5432;
+public configurable string dbName = "transport_db";
+public configurable string dbUser = "transport_user";
+public configurable string dbPassword = "transport_pass";
+
+// Database client
+final postgresql:Client dbClient = check new (
+    host = dbHost,
+    port = dbPort,
+    username = dbUser,
+    password = dbPassword,
+    database = dbName,
+    connectionPool = {
+        maxOpenConnections: 5,
+        minIdleConnections: 1,
+        maxConnectionLifeTime: 1800
+    }
+);
+
+// Function to save a new user
+public function saveUser(UserRegistration userReg, string hashedPassword) returns int|error {
+    sql:ParameterizedQuery query = `
+        INSERT INTO users (email, password_hash, full_name, role, wallet_balance)
+        VALUES (${userReg.email}, ${hashedPassword}, ${userReg.full_name}, 'PASSENGER', 100.00)
+        RETURNING id
+    `;
+    
+    sql:ExecutionResult result = check dbClient->execute(query);
+    return <int>result.lastInsertId;
+}
+
+// Function to find user by email
+public function getUserByEmail(string email) returns User|error {
+    sql:ParameterizedQuery query = `SELECT * FROM users WHERE email = ${email}`;
+    User user = check dbClient->queryRow(query);
+    return user;
+}
+
+// Function to get user's tickets
+public function getUserTickets(int userId) returns Ticket[]|error {
+    sql:ParameterizedQuery query = `
+        SELECT id, ticket_number, user_id, trip_id, ticket_type, 
+               amount, status, purchase_date::text as purchase_date
+        FROM tickets 
+        WHERE user_id = ${userId}
+        ORDER BY purchase_date DESC
+    `;
+    
+    stream<Ticket, sql:Error?> ticketStream = dbClient->query(query);
+    Ticket[] tickets = check from Ticket ticket in ticketStream select ticket;
+    check ticketStream.close();
+    
+    return tickets;
+}
