@@ -1,4 +1,4 @@
-import ballerina/kafka;
+import ballerinax/kafka;
 import ballerina/time;
 import ballerina/os;
 
@@ -70,3 +70,78 @@ public type PaymentResponse record {
     string kafkaBootStrap = "kafka:9092";
     int httpPort=9094;
  };
+
+ public function getConfig() returns PaymentConfig|error {
+   PaymentConfig config = {};
+   string|() v;
+    v = os:getEnv("DB_HOST");
+      if( v is string) {
+        config.dbHost = v;
+      }
+
+    v= os:getEnv("DB_PORT");
+      if( v is string) {
+         config.dbPort = check int:fromString(v);
+      }
+
+    v= os:getEnv("DB_USER");
+      if( v is string) {
+         config.dbUser = v;
+      }
+
+    v= os:getEnv("DB_PASSWORD");
+      if( v is string) {
+         config.dbPassword = v;
+      }
+
+    v= os:getEnv("DB_NAME");
+      if( v is string) {
+         config.dbName = v;
+      }
+
+    v= os:getEnv("KAFKA_BOOTSTRAP");
+      if( v is string) {
+         config.kafkaBootStrap = v;
+      }
+
+    v= os:getEnv("HTTP_PORT");   
+      if( v is string) {
+         config.httpPort = check int:fromString(v);
+      }
+
+    return config;
+ };
+
+ //Kafka topics
+public const string TOPIC_TICKET_PURCHASE_REQUEST = "ticket.purchase.request";
+public const string TOPIC_PAYMENT_COMPLETED= "payment.completed";
+public const string TOPIC_PAYMENT_FAILED= "payment.failed";
+public const string TOPIC_WALLET_UPDATED= "wallet.updated";
+public const string TOPIC_NOTIFICATIONS_SEND= "notification.send";
+
+//Kafka producer client
+public client class KafkaProducer {
+   private kafka:Producer producer;
+
+   public function init(string bootstrapServers) returns error? {
+       self.producer = check new ([bootstrapServers]);
+       }
+
+   public function publishPaymentEvent(string topic, PaymentEvent event) returns error? {
+      check self.producer->send({
+           topic: topic,
+           value: event.toString()
+       });
+   }
+
+   public function publishNotification(string topic, json notification) returns error?{
+      check self.producer->send({
+           topic: topic,
+           value: notification.toString()
+       });
+   }
+
+   public function close() returns error? {
+       check self.producer->close();
+   }
+}
