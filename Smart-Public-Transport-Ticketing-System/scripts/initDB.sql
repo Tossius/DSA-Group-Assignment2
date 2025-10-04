@@ -64,14 +64,17 @@ CREATE TABLE payments (
 
 -- Notifications table
 CREATE TABLE notifications (
- id SERIAL PRIMARY KEY,
- user_id INTEGER REFERENCES users(id),
- notification_type VARCHAR(50) NOT NULL,
- title VARCHAR(255) NOT NULL,
- message TEXT NOT NULL,
- is_read BOOLEAN DEFAULT FALSE,
- sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id),
+    notification_type VARCHAR(50) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    message TEXT NOT NULL,
+    severity VARCHAR(50) DEFAULT 'INFO',
+    metadata JSONB,
+    is_read BOOLEAN DEFAULT FALSE,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
 
 -- Insert sample data
 INSERT INTO users (email, password_hash, full_name, role, wallet_balance) VALUES
@@ -82,6 +85,7 @@ INSERT INTO routes (name, route_code, start_location, end_location, distance_km,
 ('City to Airport', 'R001', 'City Center', 'Airport', 45.5, 60),
 ('Northern Loop', 'R002', 'Katutura', 'Windhoek West', 25.3, 45);
 
-INSERT INTO trips (route_id, trip_code, departure_time, arrival_time, vehicle_number, base_fare) VALUES
+INSERT INTO trips (route_id, trip_code, departure_time, arrival_time, vehicle_number, base_fare)
+VALUES
 (1, 'TRIP001', NOW() + INTERVAL '2 hours', NOW() + INTERVAL '3 hours', 'BUS-101', 25.00),
 (2, 'TRIP002', NOW() + INTERVAL '1 hour', NOW() + INTERVAL '2 hours', 'BUS-201', 15.00);
