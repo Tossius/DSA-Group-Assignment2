@@ -1,56 +1,92 @@
+// database.bal - Notification Service Database Operations
+
 import ballerina/sql;
-import ballerina/time;
-import ballerinax/postgresql as postgres;
+import ballerinax/postgresql;
+import ballerina/log;
 
-public type DatabaseContext record {
-    postgres:Client dbClient;
-};
+// Database configuration
+configurable string dbHost = ?;        // e.g., "postgres" in Docker network
+configurable int dbPort = ?;           // e.g., 5432
+configurable string dbName = ?;        // e.g., "transport_ticketing"
+configurable string dbUser = ?;        // e.g., "transport_user"
+configurable string dbPassword = ?;    // e.g., "password123"
+// Database client
+final postgresql:Client dbClient = check initDatabase();
 
-// DB Initialization
-public function initDb(NotificationConfig cfg) returns DatabaseContext|error {
-    postgres:Client dbClient = check new (
-        host = cfg.dbHost,
-        port = cfg.dbPort,
-        username = cfg.dbUser,
-        password = cfg.dbPassword,
-        database = cfg.dbName
+// Initialize database connection
+function initDatabase() returns postgresql:Client|error {
+    postgresql:Client db = check new (
+        host = dbHost,
+        port = dbPort,
+        database = dbName,
+        username = dbUser,
+        password = dbPassword
     );
-    return { dbClient };
+    log:printInfo("Database connection established successfully");
+    return db;
 }
 
-// Save a single notification
-public function saveNotification(DatabaseContext ctx, Notification notification) returns Notification|error {
-    sql:ParameterizedQuery q = `
+// Create a new notification
+public function createNotification(CreateNotificationRequest request) returns NotificationResponse|error {
+    // Handle optional severity field
+    string? severityOpt = request.severity;
+    string severity = severityOpt is string ? severityOpt : "INFO";
+    
+    // Handle optional metadata field - convert json to string for SQL
+    json? metadataJson = request?.metadata;
+    string? metadataStr = metadataJson is () ? () : metadataJson.toJsonString();
+    
+    sql:ParameterizedQuery query = `
         INSERT INTO notifications (user_id, notification_type, title, message, severity, metadata)
-        VALUES (${notification.userId}, ${notification.notificationType}, ${notification.title}, 
-                ${notification.message}, ${notification.severity}, ${notification.metadata})
-        RETURNING id, timestamp, is_read
+        VALUES (${request.user_id}, ${request.notification_type}, ${request.title}, 
+                ${request.message}, ${severity}, ${metadataStr}::jsonb)
+        RETURNING id, user_id, notification_type, title, message, severity, metadata, 
+                  is_read, timestamp
+    `;
+    
+    sql:ExecutionResult|error result = dbClient->execute(query);
+    
+    if result is error {
+        log:printError("Error creating notification", 'error = result);
+        return error("Failed to create notification: " + result.message());
+    }
+    
+    // Fetch the created notification
+    sql:ParameterizedQuery selectQuery = `
+        SELECT id, user_id, notification_type, title, message, severity, metadata, 
+               is_read, timestamp
+        FROM notifications
+        WHERE id = (SELECT currval('notifications_id_seq'))
+    `;
+    
+    NotificationResponse|error notification = dbClient->queryRow(selectQuery);
+    
+    if notification is error {
+        log:printError("Error fetching created notification", 'error = notification);
+        return error("Failed to fetch created notification");
+    }
+    
+    log:printInfo(string `Notification created: ID=${notification.id}, User=${notification.user_id}`);
+    return notification;
+}
+
+public function getNotifications(NotificationFilter filter) returns NotificationResponse[]|error {
+    sql:ParameterizedQuery query;
+
+    boolean? unreadOnly = filter.unread_only;
+    string? notifType = filter.notification_type;
+
+    query = `
+        SELECT id, user_id, notification_type, title, message, severity, metadata, is_read, timestamp
+        FROM notifications
+        WHERE user_id = ${filter.user_id}
+        ${unreadOnly == true ? "AND is_read = false" : ""}
+        ${notifType is string ? "AND notification_type = " + notifType : ""}
+        ORDER BY timestamp DESC
+        LIMIT ${filter.'limit} OFFSET ${filter.offset}
     `;
 
-    record {|int id; time:Civil timestamp; boolean is_read;|}? row = check ctx.dbClient->queryRow(q);
-    if row is () {
-        return error("Failed to insert notification");
-    }
-
-    time:Utc utcTime = check time:utcFromCivil(row.timestamp);
-
-    return {
-        ...notification,
-        id: row.id,
-        timestamp: utcTime,
-        isRead: row.is_read
-    };
-}
-
-// Get user notifications with limit
-public function getUserNotifications(DatabaseContext ctx, int userId, int limits = 50) returns Notification[]|error {
-    sql:ParameterizedQuery q = `SELECT id, user_id, notification_type, title, message, severity,
-                                timestamp, is_read, metadata
-                                FROM notifications
-                                WHERE user_id = ${userId}
-                                ORDER BY timestamp DESC
-                                LIMIT ${limits}`;
-
+    // Use anydata for timestamp to avoid type issues
     stream<record {
         int id;
         int user_id;
@@ -58,221 +94,133 @@ public function getUserNotifications(DatabaseContext ctx, int userId, int limits
         string title;
         string message;
         string severity;
-        time:Civil timestamp;
+        json metadata;
         boolean is_read;
-        json? metadata;
-    }, sql:Error?> result = ctx.dbClient->query(q);
+        anydata timestamp;
+    }, sql:Error?> resultStream = dbClient->query(query);
 
-    Notification[] notifications = [];
-    
-    error? e = result.forEach(function(record {
-        int id;
-        int user_id;
-        string notification_type;
-        string title;
-        string message;
-        string severity;
-        time:Civil timestamp;
-        boolean is_read;
-        json? metadata;
-    } row) {
-        time:Utc|error utcTime = time:utcFromCivil(row.timestamp);
-        if utcTime is time:Utc {
-            notifications.push({
-                id: row.id,
-                userId: row.user_id,
-                notificationType: row.notification_type,
-                title: row.title,
-                message: row.message,
-                severity: row.severity,
-                timestamp: utcTime,
-                isRead: row.is_read,
-                metadata: row.metadata
-            });
+    NotificationResponse[] notifications = [];
+    check from var row in resultStream
+        let NotificationResponse notif = {
+            id: row.id,
+            user_id: row.user_id,
+            notification_type: row.notification_type,
+            title: row.title,
+            message: row.message,
+            severity: row.severity,
+            metadata: row.metadata,
+            is_read: row.is_read,
+            timestamp: row.timestamp.toString() // convert to string for consistency
         }
-    });
-    
-    if e is error {
-        return e;
-    }
+        do {
+            notifications.push(notif);
+        };
 
+    log:printInfo(string `Retrieved ${notifications.length()} notifications for user ${filter.user_id}`);
     return notifications;
 }
 
-// Get unread notifications
-public function getUnreadNotifications(DatabaseContext ctx, int userId) returns Notification[]|error {
-    sql:ParameterizedQuery q = `
-        SELECT id, user_id, notification_type, title, message, severity,
-        timestamp, is_read, metadata
-        FROM notifications
-        WHERE user_id = ${userId} AND is_read = FALSE
-        ORDER BY timestamp DESC
-    `;
 
-    stream<record {|
-        int id;
-        int user_id;
-        string notification_type;
-        string title;
-        string message;
-        string severity;
-        time:Civil timestamp;
-        boolean is_read;
-        json? metadata;
-    |}, sql:Error?> result = ctx.dbClient->query(q);
 
-    Notification[] notifications = [];
-    
-    error? e = result.forEach(function(record {|
-        int id;
-        int user_id;
-        string notification_type;
-        string title;
-        string message;
-        string severity;
-        time:Civil timestamp;
-        boolean is_read;
-        json? metadata;
-    |} row) {
-        time:Utc|error utcTime = time:utcFromCivil(row.timestamp);
-        if utcTime is time:Utc {
-            notifications.push({
-                id: row.id,
-                userId: row.user_id,
-                notificationType: row.notification_type,
-                title: row.title,
-                message: row.message,
-                severity: row.severity,
-                timestamp: utcTime,
-                isRead: row.is_read,
-                metadata: row.metadata
-            });
-        }
-    });
-    
-    if e is error {
-        return e;
-    }
-
-    return notifications;
-}
-
-// Mark a single notification as read
-public function markAsRead(DatabaseContext ctx, int notificationId, int userId) returns error? {
-    sql:ParameterizedQuery q = `
+// Mark a notification as read
+public function markAsRead(int notificationId, int userId) returns boolean|error {
+    sql:ParameterizedQuery query = `
         UPDATE notifications
-        SET is_read = TRUE
+        SET is_read = true
         WHERE id = ${notificationId} AND user_id = ${userId}
     `;
-    _ = check ctx.dbClient->execute(q);
+    
+    sql:ExecutionResult result = check dbClient->execute(query);
+    
+    int? affectedRowsNullable = result.affectedRowCount;
+    int affectedRows = affectedRowsNullable is int ? affectedRowsNullable : 0;
+    
+    if affectedRows > 0 {
+        log:printInfo(string `Notification ${notificationId} marked as read`);
+        return true;
+    }
+    
+    return false;
 }
 
-// Mark all notifications as read
-public function markAllAsRead(DatabaseContext ctx, int userId) returns error? {
-    sql:ParameterizedQuery q = `
+// Mark all notifications as read for a user
+public function markAllAsRead(int userId) returns int|error {
+    sql:ParameterizedQuery query = `
         UPDATE notifications
-        SET is_read = TRUE
-        WHERE user_id = ${userId} AND is_read = FALSE
+        SET is_read = true
+        WHERE user_id = ${userId} AND is_read = false
     `;
-    _ = check ctx.dbClient->execute(q);
+    
+    sql:ExecutionResult result = check dbClient->execute(query);
+    int? affectedCountNullable = result.affectedRowCount;
+    int affectedCount = affectedCountNullable is int ? affectedCountNullable : 0;
+    
+    log:printInfo(string `Marked ${affectedCount} notifications as read for user ${userId}`);
+    return affectedCount;
+}
+
+// Get unread notification count for a user
+public function getUnreadCount(int userId) returns int|error {
+    sql:ParameterizedQuery query = `
+        SELECT COUNT(*) as count
+        FROM notifications
+        WHERE user_id = ${userId} AND is_read = false
+    `;
+    
+    record {| int count; |}|error result = dbClient->queryRow(query);
+    
+    if result is error {
+        log:printError("Error getting unread count", 'error = result);
+        return 0;
+    }
+    
+    return result.count;
 }
 
 // Delete a notification
-public function deleteNotification(DatabaseContext ctx, int notificationId, int userId) returns error? {
-    sql:ParameterizedQuery q = `
+public function deleteNotification(int notificationId, int userId) returns boolean|error {
+    sql:ParameterizedQuery query = `
         DELETE FROM notifications
         WHERE id = ${notificationId} AND user_id = ${userId}
     `;
-    _ = check ctx.dbClient->execute(q);
-}
-
-// Get affected users by route
-public function getAffectedUsersByRoute(DatabaseContext ctx, int routeId) returns int[]|error {
-    sql:ParameterizedQuery q = `
-        SELECT DISTINCT u.id
-        FROM users u
-        INNER JOIN tickets t ON t.user_id = u.id
-        INNER JOIN trips tr ON tr.id = t.trip_id
-        WHERE tr.route_id = ${routeId}
-          AND t.status IN ('PAID', 'VALIDATED')
-          AND tr.departure_time > CURRENT_TIMESTAMP
-    `;
-
-    stream<record {|int id;|}, sql:Error?> result = ctx.dbClient->query(q);
-
-    int[] userIds = [];
     
-    error? e = result.forEach(function(record {|int id;|} row) {
-        userIds.push(row.id);
-    });
+    sql:ExecutionResult result = check dbClient->execute(query);
     
-    if e is error {
-        return e;
+    int? affectedRowsNullable = result.affectedRowCount;
+    int affectedRows = affectedRowsNullable is int ? affectedRowsNullable : 0;
+    
+    if affectedRows > 0 {
+        log:printInfo(string `Notification ${notificationId} deleted`);
+        return true;
     }
-
-    return userIds;
+    
+    return false;
 }
 
-// Get affected users by trip
-public function getAffectedUsersByTrip(DatabaseContext ctx, int tripId) returns int[]|error {
-    sql:ParameterizedQuery q = `
-        SELECT DISTINCT u.id
-        FROM users u
-        INNER JOIN tickets t ON t.user_id = u.id
-        WHERE t.trip_id = ${tripId}
-          AND t.status IN ('PAID', 'VALIDATED')
-    `;
-
-    stream<record {|int id;|}, sql:Error?> result = ctx.dbClient->query(q);
-
-    int[] userIds = [];
+// Bulk create notifications for multiple users
+public function createBulkNotifications(int[] userIds, string notificationType, 
+                                       string title, string message, 
+                                       string severity, json? metadata) returns int|error {
+    int successCount = 0;
     
-    error? e = result.forEach(function(record {|int id;|} row) {
-        userIds.push(row.id);
-    });
-    
-    if e is error {
-        return e;
-    }
-
-    return userIds;
-}
-
-// Get notification stats
-public function getNotificationStats(DatabaseContext ctx, int userId) returns map<json>|error {
-    int total = 0;
-    int unread = 0;
-    int disruptions = 0;
-    int validations = 0;
-    int payments = 0;
-
-    record {|int count;|}? row;
-
-    // Total
-    row = check ctx.dbClient->queryRow(`SELECT COUNT(*) AS count FROM notifications WHERE user_id = ${userId}`);
-    total = row?.count ?: 0;
-
-    // Unread
-    row = check ctx.dbClient->queryRow(`SELECT COUNT(*) AS count FROM notifications WHERE user_id = ${userId} AND is_read = FALSE`);
-    unread = row?.count ?: 0;
-
-    // By type
-    row = check ctx.dbClient->queryRow(`SELECT COUNT(*) AS count FROM notifications WHERE user_id = ${userId} AND notification_type = 'TRIP_DISRUPTION'`);
-    disruptions = row?.count ?: 0;
-
-    row = check ctx.dbClient->queryRow(`SELECT COUNT(*) AS count FROM notifications WHERE user_id = ${userId} AND notification_type = 'TICKET_VALIDATED'`);
-    validations = row?.count ?: 0;
-
-    row = check ctx.dbClient->queryRow(`SELECT COUNT(*) AS count FROM notifications WHERE user_id = ${userId} AND notification_type = 'PAYMENT_CONFIRMED'`);
-    payments = row?.count ?: 0;
-
-    return {
-        total: total,
-        unread: unread,
-        byType: {
-            disruptions: disruptions,
-            validations: validations,
-            payments: payments
+    foreach int userId in userIds {
+        CreateNotificationRequest request = {
+            user_id: userId,
+            notification_type: notificationType,
+            title: title,
+            message: message,
+            severity: severity,
+            metadata: metadata
+        };
+        
+        NotificationResponse|error result = createNotification(request);
+        if result is NotificationResponse {
+            successCount += 1;
+        } else {
+            log:printError(string `Failed to create notification for user ${userId}`, 'error = result);
         }
-    };
+    }
+    
+    log:printInfo(string `Bulk created ${successCount}/${userIds.length()} notifications`);
+    return successCount;
 }

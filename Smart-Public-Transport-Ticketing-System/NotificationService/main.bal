@@ -1,235 +1,303 @@
+// main.bal - Notification Service Main Entry Point
+
 import ballerina/http;
 import ballerina/log;
 import ballerinax/kafka;
 
-final NotificationConfig CONFIG = getConfigFromEnv();
+// Service configuration
+configurable int servicePort = 8084;
+configurable string kafkaBroker = "PLAINTEXT://localhost:9092";
 
-listener http:Listener notificationListener = new (9097);
+// HTTP Service for Notification API
+service /notifications on new http:Listener(servicePort) {
 
-service /notifications on notificationListener {
-    DatabaseContext ctx;
-    ScheduleUpdateConsumer scheduleConsumer;
-    TicketLifecycleConsumer ticketConsumer;
-    PaymentConsumer paymentConsumer;
+    // GET /notifications/{userId}?unread_only=true&type=TICKET_VALIDATED&limit=50&offset=0
+    resource function get [int userId](http:Request req) returns http:Response {
+        http:Response response = new;
 
-    function init() returns error? {
-        log:printInfo("Initializing Notification Service...");
-        
-        self.ctx = check initDb(CONFIG);
-        log:printInfo("Database initialized");
-        
-        self.scheduleConsumer = check new (CONFIG);
-        self.ticketConsumer = check new (CONFIG);
-        self.paymentConsumer = check new (CONFIG);
-        log:printInfo("Kafka consumers initialized");
-        
-        _ = start self.consumeScheduleUpdates();
-        _ = start self.consumeTicketLifecycle();
-        _ = start self.consumePayments();
-        log:printInfo("Kafka consumers started");
+        string? unreadOnlyStr = req.getQueryParamValue("unread_only");
+        string? notificationType = req.getQueryParamValue("type");
+        string? limitStr = req.getQueryParamValue("limit");
+        string? offsetStr = req.getQueryParamValue("offset");
+
+        boolean? unreadOnly = unreadOnlyStr == "true" ? true : (unreadOnlyStr == "false" ? false : ());
+
+        int 'limit = 50;
+        if limitStr is string {
+            int|error limitResult = int:fromString(limitStr);
+            if limitResult is int {
+                'limit = limitResult;
+            }
+        }
+
+        int offset = 0;
+        if offsetStr is string {
+            int|error offsetResult = int:fromString(offsetStr);
+            if offsetResult is int {
+                offset = offsetResult;
+            }
+        }
+
+        NotificationFilter filter = {
+            user_id: userId,
+            unread_only: unreadOnly,
+            notification_type: notificationType,
+            'limit: 'limit,
+            offset: offset
+        };
+
+        NotificationResponse[]|error notifications = getNotifications(filter);
+
+        if notifications is error {
+            response.statusCode = 500;
+            response.setJsonPayload({
+                success: false,
+                message: "Failed to retrieve notifications",
+                data: ()
+            });
+            log:printError("Error retrieving notifications", 'error = notifications);
+        } else {
+            response.statusCode = 200;
+            response.setJsonPayload({
+                success: true,
+                message: "Notifications retrieved successfully",
+                data: notifications
+            });
+        }
+
+        return response;
     }
 
-    resource function get health() returns json {
-    return { status: "ok", "service": "notification-service" };
+    // GET /notifications/{userId}/unreadcount
+    resource function get [int userId]/unreadcount() returns http:Response {
+        http:Response response = new;
+
+        int|error count = getUnreadCount(userId);
+
+        if count is error {
+            response.statusCode = 500;
+            response.setJsonPayload({
+                success: false,
+                message: "Failed to get unread count",
+                data: ()
+            });
+        } else {
+            response.statusCode = 200;
+            response.setJsonPayload({
+                success: true,
+                message: "Unread count retrieved",
+                data: {count: count}
+            });
+        }
+
+        return response;
+    }
+
+    // PUT /notifications/{notificationId}/markread?userId=123
+    resource function put [int notificationId]/markread(int userId) returns http:Response {
+        http:Response response = new;
+
+        boolean|error result = markAsRead(notificationId, userId);
+
+        if result is error {
+            response.statusCode = 500;
+            response.setJsonPayload({
+                success: false,
+                message: "Failed to mark notification as read",
+                data: ()
+            });
+        } else if result == false {
+            response.statusCode = 404;
+            response.setJsonPayload({
+                success: false,
+                message: "Notification not found or unauthorized",
+                data: ()
+            });
+        } else {
+            response.statusCode = 200;
+            response.setJsonPayload({
+                success: true,
+                message: "Notification marked as read",
+                data: ()
+            });
+        }
+
+        return response;
+    }
+
+    // PUT /notifications/users/{userId}/markallread
+    resource function put users/[int userId]/markallread() returns http:Response {
+        http:Response response = new;
+
+        int|error count = markAllAsRead(userId);
+
+        if count is error {
+            response.statusCode = 500;
+            response.setJsonPayload({
+                success: false,
+                message: "Failed to mark all notifications as read",
+                data: ()
+            });
+        } else {
+            response.statusCode = 200;
+            response.setJsonPayload({
+                success: true,
+                message: string `${count} notifications marked as read`,
+                data: {count: count}
+            });
+        }
+
+        return response;
+    }
+
+    // DELETE /notifications/{notificationId}?userId=123
+    resource function delete [int notificationId](int userId) returns http:Response {
+        http:Response response = new;
+
+        boolean|error result = deleteNotification(notificationId, userId);
+
+        if result is error {
+            response.statusCode = 500;
+            response.setJsonPayload({
+                success: false,
+                message: "Failed to delete notification",
+                data: ()
+            });
+        } else if result == false {
+            response.statusCode = 404;
+            response.setJsonPayload({
+                success: false,
+                message: "Notification not found or unauthorized",
+                data: ()
+            });
+        } else {
+            response.statusCode = 200;
+            response.setJsonPayload({
+                success: true,
+                message: "Notification deleted",
+                data: ()
+            });
+        }
+
+        return response;
+    }
+
+    // POST /notifications
+    resource function post .(CreateNotificationRequest request) returns http:Response {
+        http:Response response = new;
+
+        NotificationResponse|error result = createNotification(request);
+
+        if result is error {
+            response.statusCode = 500;
+            response.setJsonPayload({
+                success: false,
+                message: "Failed to create notification",
+                data: ()
+            });
+        } else {
+            response.statusCode = 201;
+            response.setJsonPayload({
+                success: true,
+                message: "Notification created successfully",
+                data: result
+            });
+        }
+
+        return response;
+    }
 }
 
-    resource function get user/[int userId]() returns Notification[]|error {
-        return check getUserNotifications(self.ctx, userId);
-    }
+// Kafka Consumers for Event-Driven Notifications
 
-    resource function get user/[int userId]/unread() returns Notification[]|error {
-        return check getUnreadNotifications(self.ctx, userId);
+listener kafka:Listener ticketValidatedConsumer = check new (
+    kafkaBroker,
+    {
+        groupId: "notification-service-ticket-group",
+        topics: ["ticket.validated"]
     }
+);
 
-    resource function get user/[int userId]/stats() returns json|error {
-        return check getNotificationStats(self.ctx, userId);
+listener kafka:Listener scheduleUpdateConsumer = check new (
+    kafkaBroker,
+    {
+        groupId: "notification-service-schedule-group",
+        topics: ["schedule.updates"]
     }
+);
 
-    resource function put [int notificationId]/read(int userId) returns json|error {
-        check markAsRead(self.ctx, notificationId, userId);
-        return { success: true, message: "Notification marked as read" };
+listener kafka:Listener tripDisruptionConsumer = check new (
+    kafkaBroker,
+    {
+        groupId: "notification-service-disruption-group",
+        topics: ["trip.disruptions"]
     }
+);
 
-    resource function put user/[int userId]/read\-all() returns json|error {
-        check markAllAsRead(self.ctx, userId);
-        return { success: true, message: "All notifications marked as read" };
+listener kafka:Listener paymentProcessedConsumer = check new (
+    kafkaBroker,
+    {
+        groupId: "notification-service-payment-group",
+        topics: ["payments.processed"]
     }
+);
 
-    resource function delete [int notificationId](int userId) returns json|error {
-        check deleteNotification(self.ctx, notificationId, userId);
-        return { success: true, message: "Notification deleted" };
-    }
+// Kafka services
 
-    resource function post manual(@http:Payload Notification notification) returns Notification|error {
-        return check saveNotification(self.ctx, notification);
-    }
-
-    function consumeScheduleUpdates() returns error? {
-        kafka:Consumer consumer = self.scheduleConsumer.getConsumer();
-        while true {
-            kafka:BytesConsumerRecord[] records = check consumer->poll(1);
-            
-            foreach kafka:BytesConsumerRecord rec in records {
-                byte[] valueBytes = rec.value;
-                string valueStr = check string:fromBytes(valueBytes);
-                json payload = check valueStr.fromJsonString();
-                
-                ScheduleUpdateEvent event = check payload.cloneWithType();
-                check self.handleScheduleUpdate(event);
-            }
-        }
-    }
-
-    function consumeTicketLifecycle() returns error? {
-        kafka:Consumer consumer = self.ticketConsumer.getConsumer();
-        while true {
-            kafka:BytesConsumerRecord[] records = check consumer->poll(1);
-            
-            foreach kafka:BytesConsumerRecord rec in records {
-                byte[] valueBytes = rec.value;
-                string valueStr = check string:fromBytes(valueBytes);
-                json payload = check valueStr.fromJsonString();
-                
-                string eventType = check payload.event;
-                
-                if eventType == "TICKET_VALIDATED" {
-                    TicketValidationEvent event = check payload.cloneWithType();
-                    check self.handleTicketValidation(event);
-                }
-            }
-        }
-    }
-
-    function consumePayments() returns error? {
-        kafka:Consumer consumer = self.paymentConsumer.getConsumer();
-        while true {
-            kafka:BytesConsumerRecord[] records = check consumer->poll(1);
-            
-            foreach kafka:BytesConsumerRecord rec in records {
-                byte[] valueBytes = rec.value;
-                string valueStr = check string:fromBytes(valueBytes);
-                json payload = check valueStr.fromJsonString();
-                
-                PaymentEvent event = check payload.cloneWithType();
-                check self.handlePaymentEvent(event);
-            }
-        }
-    }
-
-    function handleScheduleUpdate(ScheduleUpdateEvent event) returns error? {
-        log:printInfo(string `Processing schedule update: ${event.event}`);
-        
-        match event.event {
-            "ROUTE_CREATED" => {
-                log:printInfo(string `New route created: ${event.name ?: "Unknown"}`);
-            }
-            "TRIP_CREATED" => {
-                log:printInfo(string `New trip created: ${event.tripCode ?: "Unknown"}`);
-            }
-            "DISRUPTION" => {
-                check self.handleDisruption(event);
-            }
-            _ => {
-                log:printWarn(string `Unknown schedule update event: ${event.event}`);
-            }
-        }
-    }
-
-    function handleDisruption(ScheduleUpdateEvent event) returns error? {
-        string disruptionType = event.'type ?: "INFO";
-        string title = event.title ?: "Service Update";
-        string message = event.message ?: "A service update has been issued.";
-        string severity = event.severity ?: "MEDIUM";
-        
-        int[] affectedUsers = [];
-        
-        if event.tripId is int {
-            affectedUsers = check getAffectedUsersByTrip(self.ctx, <int>event.tripId);
-        } else if event.routeId is int {
-            affectedUsers = check getAffectedUsersByRoute(self.ctx, <int>event.routeId);
-        }
-        
-        log:printInfo(string `Disruption affects ${affectedUsers.length()} users`);
-        
-        foreach int userId in affectedUsers {
-            Notification notification = {
-                userId: userId,
-                notificationType: "TRIP_DISRUPTION",
-                title: title,
-                message: message,
-                severity: severity,
-                isRead: false,
-                metadata: {
-                    disruptionType: disruptionType,
-                    routeId: event.routeId,
-                    tripId: event.tripId,
-                    tripCode: event.tripCode
+service on ticketValidatedConsumer {
+    remote function onConsumerRecord(TicketValidatedEvent[] events) returns error? {
+        foreach var event in events {
+            log:printInfo(string `Ticket validated for ticket ${event.ticket_number}`);
+            CreateNotificationRequest notification = {
+                user_id: event.user_id,
+                notification_type: "TICKET_VALIDATED",
+                title: "Ticket Validated",
+                message: string `Your ticket ${event.ticket_number} has been validated successfully.`,
+                severity: "INFO",
+                metadata: <json>{
+                    ticket_id: event.ticket_id,
+                    trip_id: event.trip_id,
+                    ticket_number: event.ticket_number,
+                    validation_date: event.validation_date
                 }
             };
-            
-            _ = check saveNotification(self.ctx, notification);
-        }
-        
-        log:printInfo(string `Created ${affectedUsers.length()} disruption notifications`);
-    }
-
-    function handleTicketValidation(TicketValidationEvent event) returns error? {
-        log:printInfo(string `Processing ticket validation for ticket ${event.ticketId}`);
-        
-        Notification notification = {
-            userId: event.userId,
-            notificationType: "TICKET_VALIDATED",
-            title: "Ticket Validated",
-            message: string `Your ticket for trip ${event.tripCode} has been validated successfully.`,
-            severity: "LOW",
-            isRead: false,
-            metadata: {
-                ticketId: event.ticketId,
-                tripId: event.tripId,
-                tripCode: event.tripCode,
-                validatedAt: event.validatedAt,
-                vehicleNumber: event.vehicleNumber
+            NotificationResponse|error result = createNotification(notification);
+            if result is error {
+                log:printError("Failed to create ticket validated notification", 'error = result);
             }
-        };
-        
-        _ = check saveNotification(self.ctx, notification);
-        log:printInfo(string `Created validation notification for user ${event.userId}`);
-    }
-
-    function handlePaymentEvent(PaymentEvent event) returns error? {
-        log:printInfo(string `Processing payment event: ${event.event} for payment ${event.paymentId}`);
-        
-        string title;
-        string message;
-        string severity;
-        
-        if event.event == "PAYMENT_CONFIRMED" {
-            title = "Payment Confirmed";
-            message = string `Your payment of $${event.amount} has been processed successfully.`;
-            severity = "LOW";
-        } else {
-            title = "Payment Failed";
-            message = string `Your payment of $${event.amount} could not be processed. Please try again.`;
-            severity = "HIGH";
         }
-        
-        Notification notification = {
-            userId: event.userId,
-            notificationType: "PAYMENT_CONFIRMED",
-            title: title,
-            message: message,
-            severity: severity,
-            isRead: false,
-            metadata: {
-                paymentId: event.paymentId,
-                ticketId: event.ticketId,
-                amount: event.amount,
-                status: event.status,
-                timestamp: event.timestamp
-            }
-        };
-        
-        _ = check saveNotification(self.ctx, notification);
-        log:printInfo(string `Created payment notification for user ${event.userId}`);
     }
+}
+
+service on scheduleUpdateConsumer {
+    remote function onConsumerRecord(ScheduleUpdateEvent[] events) returns error? {
+        foreach var event in events {
+            log:printInfo(string `Schedule update for trip ${event.trip_code}`);
+            // process events...
+        }
+    }
+}
+
+service on tripDisruptionConsumer {
+    remote function onConsumerRecord(TripDisruptionEvent[] events) returns error? {
+        foreach var event in events {
+            log:printInfo(string `Trip disruption for trip ${event.trip_code}`);
+            // process events...
+        }
+    }
+}
+
+service on paymentProcessedConsumer {
+    remote function onConsumerRecord(PaymentProcessedEvent[] events) returns error? {
+        foreach var event in events {
+            log:printInfo(string `Payment processed for reference ${event.payment_reference}`);
+            // process events...
+        }
+    }
+}
+
+// Main function to start the service
+public function main() returns error? {
+    log:printInfo(string `Notification Service started on port ${servicePort}`);
+    log:printInfo("Kafka consumers initialized and listening for events");
 }

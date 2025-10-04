@@ -1,8 +1,8 @@
 [package]
 org = "knitt"
-name = "NotificationService"
+name = "notification_service"
 version = "0.1.0"
-distribution = "2201.9.0"
+distribution = "2201.10.2"
 
 [build-options]
 observabilityIncluded = true
@@ -10,22 +10,12 @@ observabilityIncluded = true
 [[dependency]]
 org = "ballerina"
 name = "http"
-version = "2.11.2"
+version = "2.11.1"
 
 [[dependency]]
 org = "ballerina"
 name = "log"
-version = "2.9.0"
-
-[[dependency]]
-org = "ballerina"
-name = "sql"
-version = "1.13.0"
-
-[[dependency]]
-org = "ballerina"
-name = "time"
-version = "2.4.0"
+version = "2.10.0"
 
 [[dependency]]
 org = "ballerinax"
@@ -38,4 +28,7 @@ name = "kafka"
 version = "3.7.0"
 
 [platform.java17]
-graalvmCompatible = true
+[[platform.java17.dependency]]
+groupId = "org.postgresql"
+artifactId = "postgresql"
+version = "42.7.2"
