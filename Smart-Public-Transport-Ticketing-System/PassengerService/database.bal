@@ -78,3 +78,10 @@ public function getUserTickets(int userId) returns Ticket[]|error {
     
     return tickets;
 }
+public function getUserById(int userId) returns User|error {
+    postgresql:Client dbClient = check getDbClient();
+    
+    sql:ParameterizedQuery query = `SELECT * FROM users WHERE id = ${userId}`;
+    User user = check dbClient->queryRow(query);
+    return user;
+}
