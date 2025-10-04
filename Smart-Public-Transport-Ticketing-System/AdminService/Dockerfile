@@ -15,4 +15,7 @@ RUN chmod -R 755 /app && bal build
 EXPOSE 9096
 
 CMD ["bal", "run", "target/bin/service.jar"]
+<<<<<<< HEAD
+>>>>>>> a293d76a25d58fb62d19e65bdd1b76ac1f92656b
+=======
 >>>>>>> a293d76a25d58fb62d19e65bdd1b76ac1f92656b
