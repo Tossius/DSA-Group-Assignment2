@@ -1,10 +1,17 @@
-FROM ballerina/ballerina:2201.9.0
+FROM ballerina/ballerina:2201.10.2
+
+# Switch to root to ensure write permissions
+USER root
 
 WORKDIR /app
-COPY . /app
 
-RUN bal build --cloud=docker
+# Copy project files
+COPY . .
 
-EXPOSE 9097
+# Build the project
+RUN bal build
 
-CMD ["bal", "run"]
+EXPOSE 8084
+
+# Run the compiled service
+CMD ["bal", "run", "target/bin/notification_service.jar"]
