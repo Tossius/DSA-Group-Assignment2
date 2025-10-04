@@ -1,0 +1,7 @@
+target/
+*.jar
+*.class
+.DS_Store
+*.log
+test_*.bat
+*.md

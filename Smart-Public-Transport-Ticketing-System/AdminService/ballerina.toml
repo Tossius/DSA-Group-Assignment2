@@ -9,4 +9,9 @@ observabilityIncluded = true
 [[dependency]]
 org = "ballerinax"
 name = "postgresql"
-version = "1.16.1"
+version = "1.13.3"
+
+[[dependency]]
+org = "ballerinax"
+name = "kafka"
+version = "3.10.2"
