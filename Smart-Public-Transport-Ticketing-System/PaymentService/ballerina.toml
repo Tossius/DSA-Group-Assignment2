@@ -1,49 +1,13 @@
 [package]
-org = "smart.transport"
-name = "payment_service"
+org = "snitc"
+name = "PaymentService"
 version = "0.1.0"
+distribution = "2201.10.0"
 
 [build-options]
 observabilityIncluded = true
 
-[[platform.java11.dependency]]
-groupId = "io.ballerina.lib"
-artifactId = "postgresql-driver"
+[[platform.java17.dependency]]
+groupId = "org.postgresql"
+artifactId = "postgresql"
 version = "42.7.2"
-
-[dependency]
-[[dependency.module]]
-org = "ballerinax"
-name = "postgresql"
-version = "1.9.0"
-
-[[dependency.module]]
-org = "ballerina"
-name = "kafka"
-version = "3.7.0"
-
-[[dependency.module]]
-org = "ballerina"
-name = "log"
-version = "2.8.1"
-
-[[dependency.module]]
-org = "ballerina"
-name = "http"
-version = "2.9.3"   
-
-[[dependency.module]]
-org = "ballerina"   
-name = "sql"
-version = "1.9.0"
-
-[[dependency.module]]
-org = "ballerina"   
-name = "uuid"
-version = "1.6.0"
-
-[[dependency.module]]
-org = "ballerina"
-name = "time"
-version = "2.4.0"
-

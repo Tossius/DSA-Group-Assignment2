@@ -1,17 +1,20 @@
-FROM ballerina/ballerina:2201.10.2
+FROM ballerina/ballerina:2201.10.0
 
-# Switch to root to ensure write permissions
-USER root
+WORKDIR /home/ballerina
 
-WORKDIR /app
+# Copy Ballerina.toml first
+COPY Ballerina.toml .
 
-# Copy project files
-COPY . .
+# Copy source files
+COPY main.bal .
+COPY database.bal .
+COPY types.bal .
 
-# Build the project
+# Build will auto-generate Dependencies.toml
 RUN bal build
 
-EXPOSE 8084
+# Expose port
+EXPOSE 9005
 
-# Run the compiled service
-CMD ["bal", "run", "target/bin/notification_service.jar"]
+# Run the application
+CMD bal run
