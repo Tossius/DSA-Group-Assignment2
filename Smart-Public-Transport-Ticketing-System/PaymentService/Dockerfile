@@ -14,7 +14,7 @@ COPY types.bal .
 RUN bal build
 
 # Expose port
-EXPOSE 9005
+EXPOSE 9004
 
 # Run the application
 CMD bal run
