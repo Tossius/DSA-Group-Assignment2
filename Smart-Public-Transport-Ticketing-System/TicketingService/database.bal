@@ -1,142 +1,131 @@
+// TicketingService/database.bal
+
+import ballerinax/postgresql;
 import ballerina/sql;
+import ballerina/io;
+import ballerina/os;
 import ballerina/time;
-import ballerinax/postgresql as postgres;
-import ballerina/log;
 
-import TicketingService.types;
+string dbHost = os:getEnv("dbHost") != "" ? os:getEnv("dbHost") : "127.0.0.1";
+int dbPort = os:getEnv("dbPort") != "" ? check int:fromString(os:getEnv("dbPort")) : 5432;
+string dbName = os:getEnv("dbName") != "" ? os:getEnv("dbName") : "transport_db";
+string dbUser = os:getEnv("dbUser") != "" ? os:getEnv("dbUser") : "transport_user";
+string dbPassword = os:getEnv("dbPassword") != "" ? os:getEnv("dbPassword") : "transport_pass";
 
-public type DatabaseContext record {
-    postgres:Client dbClient;
-};
-
-public function initDb(types:DbConfig cfg) returns DatabaseContext|error {
-    postgres:Client dbClient = check new (
-        host = "postgres",
-        port = cfg.port,
-        username = cfg.user,
-        password = cfg.password,
-        database = cfg.database
-    );
-
-    check dbClient->execute(`
-        CREATE TABLE IF NOT EXISTS tickets (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            trip_id TEXT NOT NULL,
-            ticket_type TEXT NOT NULL,
-            status TEXT NOT NULL,
-            created_at TIMESTAMP NOT NULL,
-            valid_until TIMESTAMP
-        )
-    `);
-
-    log:printInfo("Postgres initialized and tickets table ensured");
-    return { dbClient };
+function init() {
+    io:println("===== TICKETING SERVICE DB CONFIG =====");
+    io:println("Host: " + dbHost);
+    io:println("Port: " + dbPort.toString());
+    io:println("Database: " + dbName);
+    io:println("User: " + dbUser);
+    io:println("=======================================");
 }
 
-public function addTicket(DatabaseContext ctx, types:Ticket ticket) returns error? {
-    string createdAtStr = time:toString(ticket.createdAt);
-    string? validUntilStr = ticket.validUntil is time:Utc ? time:toString(ticket.validUntil) : ();
+postgresql:Client? clientCache = ();
 
-    sql:ParameterizedQuery q = `
-        INSERT INTO tickets (id, user_id, trip_id, ticket_type, status, created_at, valid_until)
-        VALUES (${ticket.id}, ${ticket.userId}, ${ticket.tripId}, ${ticket.ticketType},
-                ${ticket.status.toString()}, ${createdAtStr}::timestamp, ${validUntilStr is string ? ${validUntilStr}::timestamp : null})
+function getDbClient() returns postgresql:Client|error {
+    if clientCache is () {
+        io:println("Creating ticketing database connection...");
+        postgresql:Client newClient = check new (
+            host = dbHost,
+            username = dbUser,
+            password = dbPassword,
+            database = dbName,
+            port = dbPort
+        );
+        clientCache = newClient;
+        io:println("Ticketing DB connection successful!");
+    }
+    return <postgresql:Client>clientCache;
+}
+
+public function createTicket(TicketRequest req) returns Ticket|error {
+    postgresql:Client dbClient = check getDbClient();
+    
+    // Generate ticket number
+    string ticketNumber = "TKT-" + time:utcNow()[0].toString();
+    
+    sql:ParameterizedQuery query = `
+        INSERT INTO tickets (ticket_number, user_id, trip_id, ticket_type, amount, status)
+        VALUES (${ticketNumber}, ${req.user_id}, ${req.trip_id}, ${req.ticket_type}, ${req.amount}, 'CREATED')
+        RETURNING id, ticket_number, user_id, trip_id, ticket_type, amount, status, purchase_date::text as purchase_date
     `;
-    _ = check ctx.dbClient->execute(q);
+    
+    Ticket ticket = check dbClient->queryRow(query);
+    return ticket;
 }
 
-public function getAllTickets(DatabaseContext ctx) returns types:Ticket[]|error {
-    sql:ParameterizedQuery q = `SELECT * FROM tickets ORDER BY created_at DESC`;
-    stream<record {}, sql:Error?> result = ctx.dbClient->query(q);
-
-    types:Ticket[] tickets = [];
-    error? e = result.forEach(function(record {} row) {
-        time:Utc createdAt = <time:Utc> row["created_at"];
-        time:Utc? validUntil = row["valid_until"] is time:Utc ? <time:Utc> row["valid_until"] : ();
-
-        tickets.push({
-            id: <string>row["id"],
-            userId: <string>row["user_id"],
-            tripId: <string>row["trip_id"],
-            ticketType: <string>row["ticket_type"],
-            status: <types:TicketLifecycle>row["status"],
-            createdAt: createdAt,
-            validUntil: validUntil
-        });
-    });
-
-    if e is error {
-        return e;
-    }
-    return tickets;
+public function updateTicketStatus(string ticketNumber, string status) returns error? {
+    postgresql:Client dbClient = check getDbClient();
+    
+    sql:ParameterizedQuery query = `
+        UPDATE tickets 
+        SET status = ${status}
+        WHERE ticket_number = ${ticketNumber}
+    `;
+    
+    _ = check dbClient->execute(query);
 }
 
-public function getTicketsByUser(DatabaseContext ctx, string userId) returns types:Ticket[]|error {
-    sql:ParameterizedQuery q = `SELECT * FROM tickets WHERE user_id = ${userId} ORDER BY created_at DESC`;
-    stream<record {}, sql:Error?> result = ctx.dbClient->query(q);
-
-    types:Ticket[] tickets = [];
-    error? e = result.forEach(function(record {} row) {
-        time:Utc createdAt = <time:Utc> row["created_at"];
-        time:Utc? validUntil = row["valid_until"] is time:Utc ? <time:Utc> row["valid_until"] : ();
-
-        tickets.push({
-            id: <string>row["id"],
-            userId: <string>row["user_id"],
-            tripId: <string>row["trip_id"],
-            ticketType: <string>row["ticket_type"],
-            status: <types:TicketLifecycle>row["status"],
-            createdAt: createdAt,
-            validUntil: validUntil
-        });
-    });
-
-    if e is error {
-        return e;
-    }
-    return tickets;
+public function getTicketByNumber(string ticketNumber) returns Ticket|error {
+    postgresql:Client dbClient = check getDbClient();
+    
+    sql:ParameterizedQuery query = `
+        SELECT id, ticket_number, user_id, trip_id, ticket_type, 
+               amount, status, purchase_date::text as purchase_date
+        FROM tickets 
+        WHERE ticket_number = ${ticketNumber}
+    `;
+    
+    Ticket ticket = check dbClient->queryRow(query);
+    return ticket;
 }
 
-public function getTicketById(DatabaseContext ctx, string ticketId) returns types:Ticket?|error {
-    sql:ParameterizedQuery q = `SELECT * FROM tickets WHERE id = ${ticketId}`;
-    record {}? row = check ctx.dbClient->queryRow(q);
-    if row is () {
-        return ();
+public function validateTicket(string ticketNumber) returns ValidationResponse|error {
+    Ticket|error ticketResult = getTicketByNumber(ticketNumber);
+    
+    if ticketResult is error {
+        return {
+            valid: false,
+            message: "Ticket not found"
+        };
     }
-
-    time:Utc createdAt = <time:Utc> row["created_at"];
-    time:Utc? validUntil = row["valid_until"] is time:Utc ? <time:Utc> row["valid_until"] : ();
-
+    
+    Ticket ticket = ticketResult;
+    
+    if ticket.status != "PAID" {
+        return {
+            valid: false,
+            message: "Ticket status is: " + ticket.status,
+            ticket: ticket
+        };
+    }
+    
+    // Update to validated
+    check updateTicketStatus(ticketNumber, "VALIDATED");
+    ticket.status = "VALIDATED";
+    
     return {
-        id: <string>row["id"],
-        userId: <string>row["user_id"],
-        tripId: <string>row["trip_id"],
-        ticketType: <string>row["ticket_type"],
-        status: <types:TicketLifecycle>row["status"],
-        createdAt: createdAt,
-        validUntil: validUntil
+        valid: true,
+        message: "Ticket validated successfully",
+        ticket: ticket
     };
 }
 
-public function updateTicketStatus(DatabaseContext ctx, string ticketId, types:TicketLifecycle newStatus) returns error? {
-    sql:ParameterizedQuery q = `
-        UPDATE tickets SET status = ${newStatus.toString()} WHERE id = ${ticketId}
+public function getTicketsByUserId(int userId) returns Ticket[]|error {
+    postgresql:Client dbClient = check getDbClient();
+    
+    sql:ParameterizedQuery query = `
+        SELECT id, ticket_number, user_id, trip_id, ticket_type, 
+               amount, status, purchase_date::text as purchase_date
+        FROM tickets 
+        WHERE user_id = ${userId}
+        ORDER BY purchase_date DESC
     `;
-    _ = check ctx.dbClient->execute(q);
-}
-
-public function expireDueTickets(DatabaseContext ctx) returns int|error {
-    sql:ParameterizedQuery q = `
-        UPDATE tickets SET status = ${types:TicketLifecycle.EXPIRED.toString()}
-        WHERE valid_until IS NOT NULL AND valid_until < now() AND status != ${types:TicketLifecycle.EXPIRED.toString()}
-    `;
-    sql:ExecutionResult res = check ctx.dbClient->execute(q);
-    int affected = res.affectedRowCount is int ? res.affectedRowCount : 0;
-    return affected;
-}
-
-public function deleteTicket(DatabaseContext ctx, string ticketId) returns error? {
-    sql:ParameterizedQuery q = `DELETE FROM tickets WHERE id = ${ticketId}`;
-    _ = check ctx.dbClient->execute(q);
+    
+    stream<Ticket, sql:Error?> ticketStream = dbClient->query(query);
+    Ticket[] tickets = check from Ticket ticket in ticketStream select ticket;
+    check ticketStream.close();
+    
+    return tickets;
 }

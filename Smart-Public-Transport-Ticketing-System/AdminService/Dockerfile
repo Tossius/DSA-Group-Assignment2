@@ -1,14 +1,18 @@
-FROM ballerina/ballerina:2201.9.0
+FROM ballerina/ballerina:2201.10.0
 
-WORKDIR /app
-COPY . /app
+WORKDIR /home/ballerina
 
-# Rename ballerina.toml to Ballerina.toml for compatibility
-RUN mv ballerina.toml Ballerina.toml
+# Copy Ballerina.toml first
+COPY Ballerina.toml .
 
-# Fix permissions and build
-RUN chmod -R 755 /app && bal build
+# Copy source file
+COPY service.bal .
 
-EXPOSE 9096
+# Build will auto-generate Dependencies.toml
+RUN bal build
 
-CMD ["bal", "run", "target/bin/service.jar"]
+# Expose port
+EXPOSE 9006
+
+# Run the application
+CMD bal run

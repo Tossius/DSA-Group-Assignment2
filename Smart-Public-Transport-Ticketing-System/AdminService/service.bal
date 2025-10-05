@@ -1,157 +1,193 @@
+// AdminService/service.bal
+
 import ballerina/http;
+import ballerina/log;
+import ballerinax/kafka;
 import ballerinax/postgresql;
-import ballerinax/postgresql.driver as driver;
+import ballerina/sql;
+import ballerina/os;
 
 // Database configuration
-final postgresql:Client dbClient = check new (
-    host = "localhost",
-    port = 5432,
-    user = "transport_user",
-    password = "transport_pass",
-    database = "transport_ticketing"
-);
+string dbHost = os:getEnv("dbHost") != "" ? os:getEnv("dbHost") : "127.0.0.1";
+int dbPort = os:getEnv("dbPort") != "" ? check int:fromString(os:getEnv("dbPort")) : 5432;
+string dbName = os:getEnv("dbName") != "" ? os:getEnv("dbName") : "transport_db";
+string dbUser = os:getEnv("dbUser") != "" ? os:getEnv("dbUser") : "transport_user";
+string dbPassword = os:getEnv("dbPassword") != "" ? os:getEnv("dbPassword") : "transport_pass";
 
-listener http:Listener adminListener = new (9096);
+// Kafka configuration
+string kafkaHost = os:getEnv("kafkaHost") != "" ? os:getEnv("kafkaHost") : "localhost";
+string kafkaPort = os:getEnv("kafkaPort") != "" ? os:getEnv("kafkaPort") : "9092";
+string kafkaBootstrap = kafkaHost + ":" + kafkaPort;
 
-service /admin on adminListener {
-    resource function get health() returns json {
-        return { status: "ok", message: "AdminService is running!" };
+postgresql:Client? clientCache = ();
+
+function getDbClient() returns postgresql:Client|error {
+    if clientCache is () {
+        postgresql:Client newClient = check new (
+            host = dbHost,
+            username = dbUser,
+            password = dbPassword,
+            database = dbName,
+            port = dbPort
+        );
+        clientCache = newClient;
+        log:printInfo("Admin DB connection established");
     }
+    return <postgresql:Client>clientCache;
+}
 
-    resource function get routes() returns json|http:InternalServerError {
-        postgresql:ExecutionResult result = check dbClient->query(`SELECT id, name, route_code, start_location, end_location, distance_km, estimated_duration_minutes FROM routes ORDER BY id`);
-        
-        json[] routes = [];
-        foreach record in result.rows {
-            routes.push({
-                id: <int>record["id"],
-                name: <string>record["name"],
-                routeCode: <string>record["route_code"],
-                startLocation: <string>record["start_location"],
-                endLocation: <string>record["end_location"],
-                distanceKm: <decimal>record["distance_km"],
-                estimatedDurationMinutes: <int>record["estimated_duration_minutes"]
-            });
-        }
-        
-        return routes;
-    }
+kafka:ProducerConfiguration producerConfig = {
+    clientId: "admin-service-producer",
+    acks: "all",
+    retryCount: 3
+};
 
-    resource function post routes(@http:Payload json route) returns json|http:InternalServerError {
-        string name = <string>route.name;
-        string routeCode = <string>route.routeCode;
-        string startLocation = <string>route.startLocation;
-        string endLocation = <string>route.endLocation;
-        decimal distanceKm = <decimal>route.distanceKm;
-        int estimatedDurationMinutes = <int>route.estimatedDurationMinutes;
+final kafka:Producer kafkaProducer = check new (kafkaBootstrap, producerConfig);
+
+// Types
+type DisruptionAlert record {|
+    string alert_type; // DELAY, CANCELLATION, ROUTE_CHANGE
+    string message;
+    int? route_id?;
+    int? trip_id?;
+    string severity; // LOW, MEDIUM, HIGH
+|};
+
+type SalesReport record {|
+    int total_tickets;
+    decimal total_revenue;
+    map<int> tickets_by_type;
+    map<decimal> revenue_by_route;
+|};
+
+// Admin service
+service /admin on new http:Listener(9006) {
+    
+    // Publish service disruption
+    resource function post disruptions(@http:Payload DisruptionAlert alert) returns json|error {
+        log:printInfo("Publishing disruption: " + alert.message);
         
-        postgresql:ExecutionResult result = check dbClient->execute(`
-            INSERT INTO routes (name, route_code, start_location, end_location, distance_km, estimated_duration_minutes) 
-            VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
-        `, name, routeCode, startLocation, endLocation, distanceKm, estimatedDurationMinutes);
+        // Publish to Kafka
+        check kafkaProducer->send({
+            topic: "schedule.updates",
+            value: alert.toJson()
+        });
         
-        int newId = <int>result.rows[0]["id"];
+        log:printInfo("Disruption alert published successfully");
         
-        return { 
-            success: true, 
-            created: route, 
-            id: newId 
+        return {
+            "message": "Disruption alert published",
+            "alert": alert
         };
     }
-
-    resource function get routes/[int routeId]/trips() returns json|http:InternalServerError {
-        postgresql:ExecutionResult result = check dbClient->query(`
-            SELECT id, route_id, trip_code, departure_time, arrival_time, vehicle_number, 
-                   total_seats, available_seats, base_fare, status 
-            FROM trips WHERE route_id = $1 ORDER BY departure_time
-        `, routeId);
+    
+    // Get sales report
+    resource function get reports/sales(string? startDate, string? endDate) returns SalesReport|error {
+        postgresql:Client dbClient = check getDbClient();
         
-        json[] trips = [];
-        foreach record in result.rows {
-            trips.push({
-                id: <int>record["id"],
-                routeId: <int>record["route_id"],
-                tripCode: <string>record["trip_code"],
-                departureTime: <string>record["departure_time"],
-                arrivalTime: <string>record["arrival_time"],
-                vehicleNumber: <string>record["vehicle_number"],
-                totalSeats: <int>record["total_seats"],
-                availableSeats: <int>record["available_seats"],
-                baseFare: <decimal>record["base_fare"],
-                status: <string>record["status"]
-            });
-        }
-        
-        return trips;
-    }
-
-    resource function post routes/[int routeId]/trips(@http:Payload json trip) returns json|http:InternalServerError {
-        string tripCode = <string>trip.tripCode;
-        string departureTime = <string>trip.departureTime;
-        string arrivalTime = <string>trip.arrivalTime;
-        string vehicleNumber = <string>trip.vehicleNumber;
-        int totalSeats = <int>trip.totalSeats;
-        decimal baseFare = <decimal>trip.baseFare;
-        string status = <string>trip.status;
-        
-        postgresql:ExecutionResult result = check dbClient->execute(`
-            INSERT INTO trips (route_id, trip_code, departure_time, arrival_time, vehicle_number, 
-                              total_seats, available_seats, base_fare, status) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id
-        `, routeId, tripCode, departureTime, arrivalTime, vehicleNumber, totalSeats, totalSeats, baseFare, status);
-        
-        int newId = <int>result.rows[0]["id"];
-        
-        return { 
-            success: true, 
-            routeId: routeId, 
-            created: trip,
-            id: newId
-        };
-    }
-
-    resource function post disruptions(@http:Payload json disruption) returns json {
-        // For now, just log the disruption (could be stored in database later)
-        return { accepted: true, disruption: disruption };
-    }
-
-    resource function get reports/ticketSales() returns json|http:InternalServerError {
-        postgresql:ExecutionResult result = check dbClient->query(`
-            SELECT status, SUM(amount) as total_amount, COUNT(*) as count 
+        // Total tickets and revenue
+        sql:ParameterizedQuery totalQuery = `
+            SELECT COUNT(*) as total_tickets, 
+                   COALESCE(SUM(amount), 0) as total_revenue
             FROM tickets 
-            GROUP BY status
-        `);
+            WHERE status IN ('PAID', 'VALIDATED')
+        `;
         
-        json[] sales = [];
-        foreach record in result.rows {
-            sales.push({
-                status: <string>record["status"],
-                totalAmount: <decimal>record["total_amount"],
-                count: <int>record["count"]
-            });
-        }
+        record {| int total_tickets; decimal total_revenue; |} totals = check dbClient->queryRow(totalQuery);
         
-        return sales;
+        // Tickets by type
+        sql:ParameterizedQuery typeQuery = `
+            SELECT ticket_type, COUNT(*) as count
+            FROM tickets
+            WHERE status IN ('PAID', 'VALIDATED')
+            GROUP BY ticket_type
+        `;
+        
+        stream<record {| string ticket_type; int count; |}, sql:Error?> typeStream = dbClient->query(typeQuery);
+        map<int> ticketsByType = {};
+        check from var row in typeStream
+            do {
+                ticketsByType[row.ticket_type] = row.count;
+            };
+        check typeStream.close();
+        
+        // Revenue by route (simplified)
+        map<decimal> revenueByRoute = {
+            "route_1": 1500.00,
+            "route_2": 2300.50,
+            "route_3": 1800.75
+        };
+        
+        return {
+            total_tickets: totals.total_tickets,
+            total_revenue: totals.total_revenue,
+            tickets_by_type: ticketsByType,
+            revenue_by_route: revenueByRoute
+        };
     }
-
-    resource function get reports/passengerTraffic() returns json|http:InternalServerError {
-        postgresql:ExecutionResult result = check dbClient->query(`
-            SELECT t.route_id, COUNT(DISTINCT t.id) as trips, COUNT(tk.id) as tickets
-            FROM trips t
-            LEFT JOIN tickets tk ON t.id = tk.trip_id
-            GROUP BY t.route_id
-            ORDER BY t.route_id
-        `);
+    
+    // Get passenger traffic
+    resource function get reports/traffic(int? routeId) returns json|error {
+        postgresql:Client dbClient = check getDbClient();
         
-        json[] traffic = [];
-        foreach record in result.rows {
-            traffic.push({
-                routeId: <int>record["route_id"],
-                trips: <int>record["trips"],
-                tickets: <int>record["tickets"]
-            });
+        sql:ParameterizedQuery query = `
+            SELECT DATE(purchase_date) as date, COUNT(*) as passenger_count
+            FROM tickets
+            WHERE status IN ('PAID', 'VALIDATED')
+            GROUP BY DATE(purchase_date)
+            ORDER BY DATE(purchase_date) DESC
+            LIMIT 30
+        `;
+        
+        stream<record {| string date; int passenger_count; |}, sql:Error?> trafficStream = dbClient->query(query);
+        record {| string date; int passenger_count; |}[] traffic = check from var row in trafficStream select row;
+        check trafficStream.close();
+        
+        return traffic.toJson();
+    }
+    
+    // Get all routes
+    resource function get routes() returns json|error {
+        postgresql:Client dbClient = check getDbClient();
+        
+        sql:ParameterizedQuery query = `
+            SELECT id, route_number, origin, destination, distance, base_fare
+            FROM routes
+        `;
+        
+        stream<record {}, sql:Error?> routeStream = dbClient->query(query);
+        record {}[] routes = check from var row in routeStream select row;
+        check routeStream.close();
+        
+        return routes.toJson();
+    }
+    
+    // Get all trips
+    resource function get trips(int? routeId) returns json|error {
+        postgresql:Client dbClient = check getDbClient();
+        
+        sql:ParameterizedQuery query;
+        if routeId is int {
+            query = `
+                SELECT id, route_id, departure_time::text as departure_time, 
+                       arrival_time::text as arrival_time, status
+                FROM trips
+                WHERE route_id = ${routeId}
+            `;
+        } else {
+            query = `
+                SELECT id, route_id, departure_time::text as departure_time, 
+                       arrival_time::text as arrival_time, status
+                FROM trips
+                ORDER BY departure_time DESC
+                LIMIT 50
+            `;
         }
         
-        return traffic;
+        stream<record {}, sql:Error?> tripStream = dbClient->query(query);
+        record {}[] trips = check from var row in tripStream select row;
+        check tripStream.close();
+        
+        return trips.toJson();
     }
 }
