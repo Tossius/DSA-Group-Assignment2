@@ -1,38 +1,45 @@
-import ballerina/time;
-
-public enum TicketLifecycle {
-    CREATED,
-    PAID,
-    VALIDATED,
-    EXPIRED
-}
-
-public type DbConfig record {| 
-    string host = "postgres";
-    int port = 5432;
-    string user = "transport_user";
-    string password = "transport_pass";
-    string database = "transport_ticketing";
+public type TicketRequest record {|
+    int user_id;
+    int trip_id;
+    string ticket_type;
+    decimal amount;
 |};
 
-public type Ticket record {| 
-    string id;
-    string userId;
-    string tripId;
-    string ticketType;
-    TicketLifecycle status;
-    time:Utc createdAt;
-    time:Utc? validUntil;
+public type Ticket record {|
+    int id?;
+    string ticket_number;
+    int user_id;
+    int trip_id;
+    string ticket_type;
+    decimal amount;
+    string status;
+    string purchase_date?;
+    string? validated_at?;
 |};
 
-public type ApiResponse record {| 
-    boolean success;
+public type TicketValidation record {|
+    string ticket_number;
+    int validator_id;
+|};
+
+public type ValidationResponse record {|
+    boolean valid;
     string message;
-    json? data;
+    Ticket? ticket?;
 |};
 
-public const string KAFKA_BOOTSTRAP = "kafka:29092";
-public const string TOPIC_TICKET_REQUESTS = "ticket.requests";
-public const string TOPIC_TICKET_UPDATES = "ticket.updates";
-public const string TOPIC_PAYMENTS_PROCESSED = "payments.processed";
-public const string TOPIC_VALIDATIONS_PROCESSED = "validations.processed";
+public type KafkaTicketRequest record {|
+    string ticket_number;
+    int user_id;
+    int trip_id;
+    string ticket_type;
+    decimal amount;
+    string timestamp;
+|};
+
+public type KafkaPaymentConfirmation record {|
+    string ticket_number;
+    boolean success;
+    string payment_id?;
+    string timestamp;
+|};
