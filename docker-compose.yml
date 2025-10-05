@@ -70,6 +70,27 @@ services:
     networks:
       - transport-network
 
+  # Admin Service
+  admin-service:
+    build: ./Smart-Public-Transport-Ticketing-System/AdminService
+    container_name: transport-admin-service
+    ports:
+      - "9096:9096"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: transport_user
+      DB_PASSWORD: transport_pass
+      DB_NAME: transport_ticketing
+      KAFKA_BOOTSTRAP: kafka:29092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - transport-network
+
 volumes:
   postgres_data:
 
