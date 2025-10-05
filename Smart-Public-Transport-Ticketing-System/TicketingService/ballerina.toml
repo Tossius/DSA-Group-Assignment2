@@ -1,0 +1,41 @@
+[package]
+org = "KdxKenshin"        
+name = "TicketingService"
+version = "0.1.0"
+distribution = "2201.12.10"
+
+[build-options]
+observabilityIncluded = true
+
+[[dependency]]
+org = "ballerina"
+name = "http"
+version = "2.11.2"
+
+[[dependency]]
+org = "ballerina"
+name = "log"
+version = "2.9.0"
+
+[[dependency]]
+org = "ballerina"
+name = "sql"
+version = "1.13.0"
+
+[[dependency]]
+org = "ballerina"
+name = "time"
+version = "2.7.0"
+
+[[dependency]]
+org = "ballerinax"
+name = "postgresql"
+version = "1.13.0"
+
+[[dependency]]
+org = "ballerinax"
+name = "kafka"
+version = "3.7.0"
+
+[platform.java17]
+graalvmCompatible = true
