@@ -1,22 +1,20 @@
 import ballerina/sql;
 import ballerinax/postgresql as postgres;
 
-import ./types.bal as types;
-
 public type DatabaseContext record {
     postgres:Client dbClient;
 };
 
-public function initDb(types:AdminConfig cfg) returns DatabaseContext|error {
+public function initDb(AdminConfig cfg) returns DatabaseContext|error {
     string url = string `postgresql://${cfg.dbUser}:${cfg.dbPassword}@${cfg.dbHost}:${cfg.dbPort}/${cfg.dbName}`;
     postgres:Client dbClient = check new (url);
     return { dbClient };
 }
 
-public function getRoutes(DatabaseContext ctx) returns types:Route[]|error {
+public function getRoutes(DatabaseContext ctx) returns Route[]|error {
     stream<record {|int id; string name; string route_code; string start_location; string end_location; json? stops; decimal? distance_km; int? estimated_duration_minutes;|}, error?> result =
         ctx.dbClient->query("SELECT id, name, route_code, start_location, end_location, stops, distance_km, estimated_duration_minutes FROM routes ORDER BY id DESC");
-    types:Route[] routes = [];
+    Route[] routes = [];
     check from var row in result
         do {
             routes.push({
@@ -33,7 +31,7 @@ public function getRoutes(DatabaseContext ctx) returns types:Route[]|error {
     return routes;
 }
 
-public function createRoute(DatabaseContext ctx, types:Route route) returns types:Route|error {
+public function createRoute(DatabaseContext ctx, Route route) returns Route|error {
     sql:ParameterizedQuery q = `INSERT INTO routes (name, route_code, start_location, end_location, stops, distance_km, estimated_duration_minutes)
         VALUES (${route.name}, ${route.routeCode}, ${route.startLocation}, ${route.endLocation}, ${route.stops}, ${route.distanceKm}, ${route.estimatedDurationMinutes}) RETURNING id`;
     stream<record {|int id;|}, error?> result = ctx.dbClient->query(q);
@@ -41,7 +39,7 @@ public function createRoute(DatabaseContext ctx, types:Route route) returns type
     return { ...route, id: key.id };
 }
 
-public function createTrip(DatabaseContext ctx, types:Trip trip) returns types:Trip|error {
+public function createTrip(DatabaseContext ctx, Trip trip) returns Trip|error {
     sql:ParameterizedQuery q = `INSERT INTO trips (route_id, trip_code, departure_time, arrival_time, vehicle_number, total_seats, available_seats, base_fare, status)
         VALUES (${trip.routeId}, ${trip.tripCode}, ${trip.departureTime}, ${trip.arrivalTime}, ${trip.vehicleNumber}, ${trip.totalSeats}, ${trip.availableSeats}, ${trip.baseFare}, ${trip.status}) RETURNING id`;
     stream<record {|int id;|}, error?> result = ctx.dbClient->query(q);
@@ -49,12 +47,12 @@ public function createTrip(DatabaseContext ctx, types:Trip trip) returns types:T
     return { ...trip, id: key.id };
 }
 
-public function getTrips(DatabaseContext ctx, int routeId) returns types:Trip[]|error {
+public function getTrips(DatabaseContext ctx, int routeId) returns Trip[]|error {
     sql:ParameterizedQuery q = `SELECT id, route_id, trip_code, to_char(departure_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS departure_time,
         to_char(arrival_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS arrival_time, vehicle_number, total_seats, available_seats, base_fare, status
         FROM trips WHERE route_id = ${routeId} ORDER BY departure_time`;
     stream<record {|int id; int route_id; string trip_code; string departure_time; string arrival_time; string? vehicle_number; int total_seats; int available_seats; decimal base_fare; string status;|}, error?> result = ctx.dbClient->query(q);
-    types:Trip[] trips = [];
+    Trip[] trips = [];
     check from var row in result
         do {
             trips.push({
