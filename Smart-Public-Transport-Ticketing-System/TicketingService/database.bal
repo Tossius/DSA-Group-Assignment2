@@ -1,24 +1,22 @@
 import ballerina/sql;
 import ballerina/time;
-import ballerinax/postgresql as postgres;
+import ballerinax/postgresql;
 import ballerina/log;
 
-import TicketingService.types;
-
 public type DatabaseContext record {
-    postgres:Client dbClient;
+    postgresql:Client dbClient;
 };
 
-public function initDb(types:DbConfig cfg) returns DatabaseContext|error {
-    postgres:Client dbClient = check new (
-        host = "postgres",
+public function initDb(DbConfig cfg) returns DatabaseContext|error {
+    postgresql:Client dbClient = check new (
+        host = cfg.host,
         port = cfg.port,
         username = cfg.user,
         password = cfg.password,
         database = cfg.database
     );
 
-    check dbClient->execute(`
+    _ = check dbClient->execute(`
         CREATE TABLE IF NOT EXISTS tickets (
             id TEXT PRIMARY KEY,
             user_id TEXT NOT NULL,
@@ -34,23 +32,32 @@ public function initDb(types:DbConfig cfg) returns DatabaseContext|error {
     return { dbClient };
 }
 
-public function addTicket(DatabaseContext ctx, types:Ticket ticket) returns error? {
-    string createdAtStr = time:toString(ticket.createdAt);
-    string? validUntilStr = ticket.validUntil is time:Utc ? time:toString(ticket.validUntil) : ();
-
-    sql:ParameterizedQuery q = `
-        INSERT INTO tickets (id, user_id, trip_id, ticket_type, status, created_at, valid_until)
-        VALUES (${ticket.id}, ${ticket.userId}, ${ticket.tripId}, ${ticket.ticketType},
-                ${ticket.status.toString()}, ${createdAtStr}::timestamp, ${validUntilStr is string ? ${validUntilStr}::timestamp : null})
-    `;
-    _ = check ctx.dbClient->execute(q);
+public function addTicket(DatabaseContext ctx, Ticket ticket) returns error? {
+    string createdAtStr = ticket.createdAt.toBalString();
+    
+    if ticket.validUntil is time:Utc {
+        string validUntilStr = ticket.validUntil.toBalString();
+        sql:ParameterizedQuery q = `
+            INSERT INTO tickets (id, user_id, trip_id, ticket_type, status, created_at, valid_until)
+            VALUES (${ticket.id}, ${ticket.userId}, ${ticket.tripId}, ${ticket.ticketType},
+                    ${ticket.status.toString()}, ${createdAtStr}::timestamp, ${validUntilStr}::timestamp)
+        `;
+        _ = check ctx.dbClient->execute(q);
+    } else {
+        sql:ParameterizedQuery q = `
+            INSERT INTO tickets (id, user_id, trip_id, ticket_type, status, created_at, valid_until)
+            VALUES (${ticket.id}, ${ticket.userId}, ${ticket.tripId}, ${ticket.ticketType},
+                    ${ticket.status.toString()}, ${createdAtStr}::timestamp, NULL)
+        `;
+        _ = check ctx.dbClient->execute(q);
+    }
 }
 
-public function getAllTickets(DatabaseContext ctx) returns types:Ticket[]|error {
+public function getAllTickets(DatabaseContext ctx) returns Ticket[]|error {
     sql:ParameterizedQuery q = `SELECT * FROM tickets ORDER BY created_at DESC`;
     stream<record {}, sql:Error?> result = ctx.dbClient->query(q);
 
-    types:Ticket[] tickets = [];
+    Ticket[] tickets = [];
     error? e = result.forEach(function(record {} row) {
         time:Utc createdAt = <time:Utc> row["created_at"];
         time:Utc? validUntil = row["valid_until"] is time:Utc ? <time:Utc> row["valid_until"] : ();
@@ -60,7 +67,7 @@ public function getAllTickets(DatabaseContext ctx) returns types:Ticket[]|error 
             userId: <string>row["user_id"],
             tripId: <string>row["trip_id"],
             ticketType: <string>row["ticket_type"],
-            status: <types:TicketLifecycle>row["status"],
+            status: <TicketLifecycle>row["status"],
             createdAt: createdAt,
             validUntil: validUntil
         });
@@ -72,11 +79,11 @@ public function getAllTickets(DatabaseContext ctx) returns types:Ticket[]|error 
     return tickets;
 }
 
-public function getTicketsByUser(DatabaseContext ctx, string userId) returns types:Ticket[]|error {
+public function getTicketsByUser(DatabaseContext ctx, string userId) returns Ticket[]|error {
     sql:ParameterizedQuery q = `SELECT * FROM tickets WHERE user_id = ${userId} ORDER BY created_at DESC`;
     stream<record {}, sql:Error?> result = ctx.dbClient->query(q);
 
-    types:Ticket[] tickets = [];
+    Ticket[] tickets = [];
     error? e = result.forEach(function(record {} row) {
         time:Utc createdAt = <time:Utc> row["created_at"];
         time:Utc? validUntil = row["valid_until"] is time:Utc ? <time:Utc> row["valid_until"] : ();
@@ -86,7 +93,7 @@ public function getTicketsByUser(DatabaseContext ctx, string userId) returns typ
             userId: <string>row["user_id"],
             tripId: <string>row["trip_id"],
             ticketType: <string>row["ticket_type"],
-            status: <types:TicketLifecycle>row["status"],
+            status: <TicketLifecycle>row["status"],
             createdAt: createdAt,
             validUntil: validUntil
         });
@@ -98,7 +105,7 @@ public function getTicketsByUser(DatabaseContext ctx, string userId) returns typ
     return tickets;
 }
 
-public function getTicketById(DatabaseContext ctx, string ticketId) returns types:Ticket?|error {
+public function getTicketById(DatabaseContext ctx, string ticketId) returns Ticket?|error {
     sql:ParameterizedQuery q = `SELECT * FROM tickets WHERE id = ${ticketId}`;
     record {}? row = check ctx.dbClient->queryRow(q);
     if row is () {
@@ -113,13 +120,13 @@ public function getTicketById(DatabaseContext ctx, string ticketId) returns type
         userId: <string>row["user_id"],
         tripId: <string>row["trip_id"],
         ticketType: <string>row["ticket_type"],
-        status: <types:TicketLifecycle>row["status"],
+        status: <TicketLifecycle>row["status"],
         createdAt: createdAt,
         validUntil: validUntil
     };
 }
 
-public function updateTicketStatus(DatabaseContext ctx, string ticketId, types:TicketLifecycle newStatus) returns error? {
+public function updateTicketStatus(DatabaseContext ctx, string ticketId, TicketLifecycle newStatus) returns error? {
     sql:ParameterizedQuery q = `
         UPDATE tickets SET status = ${newStatus.toString()} WHERE id = ${ticketId}
     `;
@@ -127,14 +134,15 @@ public function updateTicketStatus(DatabaseContext ctx, string ticketId, types:T
 }
 
 public function expireDueTickets(DatabaseContext ctx) returns int|error {
+   string expiredStatus = TicketLifecycle.EXPIRED.toString();
     sql:ParameterizedQuery q = `
-        UPDATE tickets SET status = ${types:TicketLifecycle.EXPIRED.toString()}
-        WHERE valid_until IS NOT NULL AND valid_until < now() AND status != ${types:TicketLifecycle.EXPIRED.toString()}
+        UPDATE tickets SET status = ${expiredStatus}
+        WHERE valid_until IS NOT NULL AND valid_until < now() AND status != ${expiredStatus}
     `;
     sql:ExecutionResult res = check ctx.dbClient->execute(q);
-    int affected = res.affectedRowCount is int ? res.affectedRowCount : 0;
+    int affected = res.affectedRowCount ?: 0;
     return affected;
-}
+} 
 
 public function deleteTicket(DatabaseContext ctx, string ticketId) returns error? {
     sql:ParameterizedQuery q = `DELETE FROM tickets WHERE id = ${ticketId}`;
