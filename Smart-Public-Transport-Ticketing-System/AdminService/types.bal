@@ -1,4 +1,6 @@
-import ballerina/kafka;
+import ballerinax/kafka;
+import ballerina/os as env;
+import ballerina/lang.'int as ints;
 
 public type Route record {
     int id?;
@@ -25,7 +27,7 @@ public type Trip record {
 };
 
 public type Disruption record {
-    string type; // CANCELLED | DELAYED | RESUMED | INFO
+    string 'type; // CANCELLED | DELAYED | RESUMED | INFO
     string title;
     string message;
     string severity; // LOW | MEDIUM | HIGH
@@ -48,28 +50,41 @@ public type AdminConfig record {
 public function getConfigFromEnv() returns AdminConfig {
     AdminConfig cfg = {};
     string|() v;
-    v = env:get("DB_HOST"); if v is string { cfg.dbHost = v; }
-    v = env:get("DB_PORT"); if v is string { cfg.dbPort = <int>checkpanic int:fromString(v); }
-    v = env:get("DB_USER"); if v is string { cfg.dbUser = v; }
-    v = env:get("DB_PASSWORD"); if v is string { cfg.dbPassword = v; }
-    v = env:get("DB_NAME"); if v is string { cfg.dbName = v; }
-    v = env:get("KAFKA_BOOTSTRAP"); if v is string { cfg.kafkaBootstrap = v; }
+    v = env:getEnv("DB_HOST"); if v is string { cfg.dbHost = v; }
+    v = env:getEnv("DB_PORT"); if v is string && v != "" { cfg.dbPort = <int>checkpanic ints:fromString(v); }
+    v = env:getEnv("DB_USER"); if v is string { cfg.dbUser = v; }
+    v = env:getEnv("DB_PASSWORD"); if v is string { cfg.dbPassword = v; }
+    v = env:getEnv("DB_NAME"); if v is string { cfg.dbName = v; }
+    v = env:getEnv("KAFKA_BOOTSTRAP"); if v is string { cfg.kafkaBootstrap = v; }
+    if (cfg.kafkaBootstrap == KAFKA_BROKER) {
+        string|() kh = env:getEnv("KAFKA_HOST");
+        string|() kp = env:getEnv("KAFKA_PORT");
+        if (kh is string) {
+            string port = kp is string ? kp : "9092";
+            cfg.kafkaBootstrap = string `${kh}:${port}`;
+        }
+    }
     return cfg;
 }
 
 public isolated client class KafkaProducer {
     private kafka:Producer producer;
 
-    public function init(string bootstrapServers) returns error? {
-        self.producer = check new ({{"bootstrap.servers": bootstrapServers}});
+    public isolated function init(string bootstrapServers) returns error? {
+        self.producer = check new (bootstrapServers);
     }
 
-    public function publish(string topic, json|record {}|string value) returns error? {
-        check self.producer->send({ topic: topic, value: value.toJsonString() });
+    public isolated function publish(string topic, json|record {}|string value) returns error? {
+        string payload = value is string ? value : value.toJsonString();
+        lock {
+            check self.producer->send({topic: topic, value: payload.toBytes()});
+        }
     }
 
-    public function close() returns error? {
-        check self.producer.close();
+    public isolated function close() returns error? {
+        lock {
+            check self.producer->close();
+        }
     }
 }
 

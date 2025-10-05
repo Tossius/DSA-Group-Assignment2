@@ -1,5 +1,5 @@
 [package]
-org = "smart.transport"
+org = "smart_transport"
 name = "admin_service"
 version = "0.1.0"
 
@@ -7,19 +7,18 @@ version = "0.1.0"
 observabilityIncluded = true
 
 [[platform.java11.dependency]]
-groupId = "io.ballerina.lib"
-artifactId = "postgresql-driver"
-version = "42.7.2"
+groupId = "org.postgresql"
+artifactId = "postgresql"
+version = "42.7.0"
 
-[dependency]
-[[dependency.module]]
+[[dependency]]
 org = "ballerinax"
 name = "postgresql"
 version = "1.9.0"
 
-[[dependency.module]]
-org = "ballerina"
+[[dependency]]
+org = "ballerinax"
 name = "kafka"
-version = "3.7.0"
+version = "3.10.2"
 
 
