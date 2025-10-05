@@ -5,10 +5,10 @@ import ballerina/os;
 //Payment records
 
 public type Payment record {
-    int id?;
+    int id;
     string payment_reference;
-    int? ticket_id;
-    int? user_id;
+    int ticket_id;
+    int user_id;
     decimal amount;
     string status= "PENDING";
     time:Utc? transaction_date;
@@ -16,8 +16,8 @@ public type Payment record {
 };
 
 public type PaymentRequest record {
-    int? ticket_id;
-    int? user_id;
+    int ticket_id;
+    int user_id;
     decimal amount;
     string? external_Payment_date;
 };
@@ -30,7 +30,7 @@ public type PaymentResponse record {
 };
 
  public type WallerTopUpRequest record {
-    int? user_id;
+    int user_id;
     decimal amount;
     string? external_Payment_date;
  };
@@ -71,7 +71,7 @@ public type PaymentResponse record {
     int httpPort=9004;
  };
 
- public function getConfig() returns PaymentConfig|error {
+ public function getConfig() returns PaymentConfig {
    PaymentConfig config = {};
    string|() v;
     v = os:getEnv("DB_HOST");
