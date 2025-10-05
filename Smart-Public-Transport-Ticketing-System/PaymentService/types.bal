@@ -28,8 +28,16 @@ public type PaymentResponse record {
     string status;
     string message;
 };
+public type NotificationMessage record {
+    int user_id;
+    string notificationType;
+    string title;
+    string message;
+    string severity;
+    json? metadata;
+};
 
- public type WallerTopUpRequest record {
+ public type WalletTopUpRequest record {
     int user_id;
     decimal amount;
     string? external_Payment_date;
@@ -69,6 +77,7 @@ public type PaymentResponse record {
     string dbName = "transport_db";
     string kafkaBootStrap = "kafka:9092";
     int httpPort=9004;
+    string consumerGroup = "payment_service_group";
  };
 
  public function getConfig() returns PaymentConfig {
@@ -81,7 +90,11 @@ public type PaymentResponse record {
 
     v= os:getEnv("DB_PORT");
       if( v is string) {
-         config.dbPort = check int:fromString(v);
+         int|error port = int:fromString(v);
+         if(port is int){
+            config.dbPort = port;
+         }
+         
       }
 
     v= os:getEnv("DB_USER");
@@ -106,7 +119,10 @@ public type PaymentResponse record {
 
     v= os:getEnv("HTTP_PORT");   
       if( v is string) {
-         config.httpPort = check int:fromString(v);
+         int|error port = int:fromString(v);
+         if(port is int){
+            config.httpPort = port;
+         }
       }
 
     return config;
@@ -144,4 +160,23 @@ public client class KafkaProducer {
    public function close() returns error? {
        check self.producer->close();
    }
+}
+
+public isolated class MessageConsumer {
+    private final kafka:Consumer consumer;
+
+    public isolated function init(PaymentConfig cfg) returns error? {
+        self.consumer = check new (cfg.kafkaBootStrap, {
+            groupId: cfg.consumerGroup,
+            topics: [TOPIC_TICKET_PURCHASE_REQUEST]
+        });
+    }
+
+    public isolated function startMessageConsumer() returns kafka:Consumer {
+        return self.consumer;
+    }
+
+    public isolated function close() returns error? {
+        check self.consumer->close();
+    }
 }

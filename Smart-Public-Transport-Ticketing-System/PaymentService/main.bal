@@ -3,7 +3,6 @@ import ballerina/log;
 import ballerina/uuid;
 import ballerina/time;
 import ballerinax/kafka;
-import ./types.bal as types;
 
 final PaymentConfig CONFIG = getConfig();
 
@@ -12,23 +11,18 @@ listener http:Listener paymentListener = new (CONFIG.httpPort);
 service /payments on paymentListener {
     DatabaseContext ctx;
     KafkaProducer producer;
-    kafka:Consumer consumer;
+    MessageConsumer messageConsumer;
 
     function init() returns error? {
+        log:printInfo("Initializing Payment Service...");
         self.ctx = check initDb(CONFIG);
-        check self.producer.init(CONFIG.kafkaBootstrap);
 
-        
+        self.producer=check new (CONFIG.kafkaBootStrap);
+        log:printInfo("Database and Kafka producer initialized");
         // Initialize Kafka consumer for ticket purchase requests
-        self.consumer = check new ({
-            "bootstrap.servers": CONFIG.kafkaBootstrap,
-            "group.id": "payment-service-group",
-            "auto.offset.reset": "earliest"
-        });
-        check self.consumer->subscribe([TOPIC_TICKET_PURCHASE_REQUESTS]);
-        
-        // Start consuming messages in background
-        _ = start self.startMessageConsumer();
+           self.messageConsumer= check new (CONFIG);
+        log:printInfo("Kafka consumers initialized");
+
         
         log:printInfo("Payment service initialized successfully");
     }
@@ -37,14 +31,14 @@ service /payments on paymentListener {
     resource function get health() returns json {
         return { 
             status: "ok", 
-            service: "payment-service",
+            service_name: "payment-service",
             timestamp: time:utcNow().toString()
         };
     }
 
     // Get wallet balance
-    resource function get wallet/[int userId]() returns WalletBalance|http:NotFound|http:InternalServerError {
-        decimal|error balanceResult = getWalletBalance(self.ctx, userId);
+    resource function get wallet/[int userId]/[int ticketId]() returns WalletBalance|http:NotFound|http:InternalServerError {
+        decimal|error balanceResult = getWalletBalance(self.ctx, userId, ticketId);
         
         if balanceResult is error {
             log:printError("Failed to get wallet balance for user: " + userId.toString(), balanceResult);
@@ -54,19 +48,20 @@ service /payments on paymentListener {
             return http:INTERNAL_SERVER_ERROR;
         }
         
-        return {
-            userId: userId,
+        return<WalletBalance> {
+            user_id: userId,
             balance: balanceResult,
-            lastUpdated: time:utcNow()
+            last_updated: time:utcNow()
         };
     }
 
     // Top up wallet
-    resource function post wallet/[int userId]/topup(@http:Payload WalletTopUpRequest request) 
+    resource function post wallet/[int userId]/[int ticketID]/topup(@http:Payload WalletTopUpRequest request) 
             returns PaymentResponse|http:BadRequest|http:InternalServerError {
         
         // Validate request
-        if request.amount <= 0 {
+        float requestFloat = <float>request.amount;
+        if requestFloat <= 0.0 {
             return http:BAD_REQUEST;
         }
 
@@ -75,11 +70,13 @@ service /payments on paymentListener {
 
         // Create payment record
         Payment payment = {
-            paymentReference: paymentReference,
-            userId: userId,
+            id:0,
+            payment_reference: "payment_reference",
+            ticket_id:0,
+            user_id: 0,
             amount: request.amount,
-            status: STATUS_PENDING,
-            paymentMethod: request.paymentMethod
+            status:"PENDING",
+            transaction_date: time:utcNow()
         };
 
         // Create payment in database
@@ -90,35 +87,36 @@ service /payments on paymentListener {
         }
 
         // Process external payment (simulate success for demo)
-        boolean paymentSuccessful = self.processExternalPayment(request.amount, request.externalPaymentData);
+        boolean paymentSuccessful = self.processExternalPayment(request.amount);
 
         if paymentSuccessful {
             // Process the wallet top-up
-            error? topupResult = processWalletTopup(self.ctx, userId, request.amount, paymentReference);
+            error? topupResult = processWalletTopup(self.ctx, userId, request.amount, paymentReference,payment.ticket_id);
             if topupResult is error {
                 log:printError("Failed to process wallet top-up", topupResult);
                 // Update payment status to failed
-                error? statusUpdate = updatePaymentStatus(self.ctx, paymentReference, STATUS_FAILED, topupResult.message());
+                error? statusUpdate = updatePaymentStatus(self.ctx, paymentReference, "FAILED", topupResult.message());
                 return http:INTERNAL_SERVER_ERROR;
             }
 
             // Update payment status to completed
-            error? statusUpdate = updatePaymentStatus(self.ctx, paymentReference, STATUS_COMPLETED, ());
+            error? statusUpdate = updatePaymentStatus(self.ctx, paymentReference, "COMPLETED", ());
             if statusUpdate is error {
                 log:printError("Failed to update payment status", statusUpdate);
             }
 
             // Get new balance for response
-            decimal|error newBalanceResult = getWalletBalance(self.ctx, userId);
+            decimal|error newBalanceResult = getWalletBalance(self.ctx, userId,ticketID);
             decimal newBalance = newBalanceResult is decimal ? newBalanceResult : 0.0;
 
             // Publish wallet updated event
             PaymentEvent event = {
-                paymentReference: paymentReference,
-                userId: userId,
+                payment_reference: paymentReference,
+                ticket_id:ticketID,
+                user_id: userId,
                 amount: request.amount,
-                status: STATUS_COMPLETED,
-                timestamp: time:utcNow().toString()
+                status: "COMPLETED",
+                time_stamp: time:utcNow().toString()
             };
 
             error? publishResult = self.producer.publishPaymentEvent(TOPIC_WALLET_UPDATED, event);
@@ -128,34 +126,36 @@ service /payments on paymentListener {
 
             // Send notification
             NotificationMessage notification = {
-                userId: userId,
+                user_id: userId,
                 notificationType: "WALLET_TOPUP",
                 title: "Wallet Top-up Successful",
+                metadata: (),
                 message: string `Your wallet has been credited with N$${request.amount}. New balance: N$${newBalance}`,
                 severity: "INFO"
             };
 
-            error? notificationResult = self.producer.publishNotification(TOPIC_NOTIFICATIONS_SEND, notification);
+            json jNotification = notification.toJson();//Convert to JSON    
+            error? notificationResult = self.producer.publishNotification(TOPIC_NOTIFICATIONS_SEND, jNotification);
             if notificationResult is error {
                 log:printError("Failed to send notification", notificationResult);
             }
 
-            return {
-                paymentReference: paymentReference,
-                status: STATUS_COMPLETED,
+            return <PaymentResponse> {
+                payment_reference: paymentReference,
+                status: "completed",
                 amount: request.amount,
                 message: "Wallet top-up successful"
             };
         } else {
             // Update payment status to failed
-            error? statusUpdate = updatePaymentStatus(self.ctx, paymentReference, STATUS_FAILED, "External payment failed");
+            error? statusUpdate = updatePaymentStatus(self.ctx, paymentReference, "FAILED", "External payment failed");
             if statusUpdate is error {
                 log:printError("Failed to update payment status", statusUpdate);
             }
 
-            return {
-                paymentReference: paymentReference,
-                status: STATUS_FAILED,
+            return <PaymentResponse> {
+                payment_reference: paymentReference,
+                status: "FAILED",
                 amount: request.amount,
                 message: "Payment failed"
             };
@@ -167,7 +167,8 @@ service /payments on paymentListener {
             returns PaymentResponse|http:BadRequest|http:InternalServerError {
         
         // Validate request
-        if request.amount <= 0 {
+        float requestFloat = <float>request.amount;
+        if requestFloat<= 0.00 {
             return http:BAD_REQUEST;
         }
 
@@ -195,16 +196,17 @@ service /payments on paymentListener {
     }
 
     // Get payment history
-    resource function get history/[int userId](int offset = 0, int 'limit = 20) 
+    resource function get history/[int userId](int offset = 0, int Limit = 20) 
             returns Payment[]|http:InternalServerError {
-        
+        int newOffset = offset;
+        int newLimit = Limit;
         // Validate parameters
-        if offset < 0 || 'limit <= 0 || 'limit > 100 {
-            offset = 0;
-            'limit = 20;
+        if (newOffset < 0 || newLimit<= 0 || newLimit > 100){
+            newOffset = 0;
+            newLimit = 20;
         }
 
-        Payment[]|error result = getPaymentHistory(self.ctx, userId, offset, 'limit);
+        Payment[]|error result = getPaymentHistory(self.ctx, userId, newOffset, newLimit);
         if result is error {
             log:printError("Failed to get payment history for user: " + userId.toString(), result);
             return http:INTERNAL_SERVER_ERROR;
@@ -235,85 +237,33 @@ service /payments on paymentListener {
 
         // Create payment record
         Payment payment = {
-            paymentReference: paymentReference,
-            ticketId: request.ticketId,
-            userId: request.userId,
+            id:0,
+            payment_reference: paymentReference,
+            ticket_id: request.ticket_id,
+            user_id: request.user_id,
             amount: request.amount,
-            status: STATUS_PROCESSING,
-            paymentMethod: request.paymentMethod
+            status: "PROCESSING",
+            transaction_date: time:utcNow()
         };
 
-        if request.paymentMethod == METHOD_WALLET {
-            // Process wallet payment using transaction-like operation
-            Payment|error result = processWalletPayment(self.ctx, payment);
-            
-            if result is error {
-                // Update payment status to failed
-                error? statusUpdate = updatePaymentStatus(self.ctx, paymentReference, STATUS_FAILED, result.message());
-                
-                // Publish payment failed event
-                PaymentEvent failedEvent = {
-                    paymentReference: paymentReference,
-                    ticketId: request.ticketId,
-                    userId: request.userId,
-                    amount: request.amount,
-                    status: STATUS_FAILED,
-                    timestamp: time:utcNow().toString()
-                };
-
-                error? publishResult = self.producer.publishPaymentEvent(TOPIC_PAYMENT_FAILED, failedEvent);
-                if publishResult is error {
-                    log:printError("Failed to publish payment failed event", publishResult);
-                }
-
-                return {
-                    paymentReference: paymentReference,
-                    status: STATUS_FAILED,
-                    amount: request.amount,
-                    message: result.message()
-                };
-            }
-
-            // Publish payment completed event
-            PaymentEvent completedEvent = {
-                paymentReference: paymentReference,
-                ticketId: request.ticketId,
-                userId: request.userId,
-                amount: request.amount,
-                status: STATUS_COMPLETED,
-                timestamp: time:utcNow().toString()
-            };
-
-            error? publishResult = self.producer.publishPaymentEvent(TOPIC_PAYMENT_COMPLETED, completedEvent);
-            if publishResult is error {
-                log:printError("Failed to publish payment completed event", publishResult);
-            }
-
-            return {
-                paymentReference: paymentReference,
-                status: STATUS_COMPLETED,
-                amount: request.amount,
-                message: "Payment successful"
-            };
-
-        } else {
+{
             // Process external payment
             Payment createdPayment = check createPayment(self.ctx, payment);
-            boolean paymentSuccessful = self.processExternalPayment(request.amount, request.externalPaymentData);
+            boolean paymentSuccessful = self.processExternalPayment(request.amount);
             
-            string finalStatus = paymentSuccessful ? STATUS_COMPLETED : STATUS_FAILED;
+            string finalStatus = paymentSuccessful ? "COMPLETED" : "FAILED";
             string? failureReason = paymentSuccessful ? () : "External payment failed";
             
             check updatePaymentStatus(self.ctx, paymentReference, finalStatus, failureReason);
             
             // Publish appropriate event
             PaymentEvent event = {
-                paymentReference: paymentReference,
-                ticketId: request.ticketId,
-                userId: request.userId,
+                payment_reference: paymentReference,
+                ticket_id: request.ticket_id,
+                user_id: request.user_id,
                 amount: request.amount,
                 status: finalStatus,
-                timestamp: time:utcNow().toString()
+                time_stamp: time:utcNow().toString()
             };
 
             string topic = paymentSuccessful ? TOPIC_PAYMENT_COMPLETED : TOPIC_PAYMENT_FAILED;
@@ -322,8 +272,8 @@ service /payments on paymentListener {
                 log:printError("Failed to publish payment event", publishResult);
             }
 
-            return {
-                paymentReference: paymentReference,
+            return <PaymentResponse> {
+                payment_reference: paymentReference,
                 status: finalStatus,
                 amount: request.amount,
                 message: paymentSuccessful ? "Payment successful" : "External payment failed"
@@ -332,22 +282,21 @@ service /payments on paymentListener {
     }
 
     // Kafka consumer for ticket purchase requests
-    function startMessageConsumer() returns error? {
+    function ConsumeMessages() returns error? {
         log:printInfo("Starting Kafka message consumer for ticket purchase requests");
-        
+        kafka:Consumer consumer = self.messageConsumer.startMessageConsumer();
         while true {
-            kafka:ConsumerRecord[]|error records = self.consumer->poll(1000);
-            
-            if records is error {
+                kafka:BytesConsumerRecord[]|error records = consumer->poll(10);            
+                if records is error {
                 log:printError("Error polling Kafka messages", records);
                 continue;
             }
             
-            foreach kafka:ConsumerRecord 'record in records {
-                log:printInfo("Received ticket purchase request: " + 'record.value.toString());
+            foreach kafka:BytesConsumerRecord cRecord in records {
+                log:printInfo("Received ticket purchase request: " + cRecord.value.toString());
                 
                 // Parse the message
-                json|error messageJson = 'record.value.fromJsonString();
+                json|error messageJson = cRecord.value.toJson();
                 if messageJson is error {
                     log:printError("Failed to parse message: " + messageJson.message());
                     continue;
@@ -362,29 +311,26 @@ service /payments on paymentListener {
 
                 // Process the payment
                 PaymentRequest paymentRequest = {
-                    userId: purchaseRequest.userId,
-                    ticketId: purchaseRequest.ticketId,
+                    user_id: purchaseRequest.user_id,
+                    ticket_id: purchaseRequest.ticket_id,
                     amount: purchaseRequest.amount,
-                    paymentMethod: purchaseRequest.paymentMethod
+                    external_Payment_date:()
                 };
 
                 PaymentResponse|error response = self.processPaymentInternal(paymentRequest);
                 if response is error {
-                    log:printError("Payment processing failed for request: " + purchaseRequest.requestId, response);
+                    log:printError("Payment processing failed for request: " + purchaseRequest.request_id, response);
                 } else {
-                    log:printInfo("Payment processed successfully: " + response.paymentReference);
+                    log:printInfo("Payment processed successfully: " + response.payment_reference);
                 }
             }
         }
     }
 
     // Simulate external payment processing
-    function processExternalPayment(decimal amount, string? paymentData) returns boolean {
-        // Simulate payment processing delay
-        // In real implementation, integrate with payment gateway (Stripe, PayPal, etc.)
+    function processExternalPayment(decimal amount) returns boolean {
         log:printInfo("Processing external payment of N$" + amount.toString());
-        
-        // Simulate 90% success rate for demo purposes
+
         return true;
     }
 }

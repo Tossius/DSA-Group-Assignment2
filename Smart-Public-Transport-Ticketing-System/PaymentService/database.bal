@@ -39,7 +39,7 @@ public function closeDb(DatabaseContext contxt) returns error? {
 
 //Wallet Functions
 
-public function getWalletBalance(DatabaseContext contxt, int user_id) returns decimal|error {
+public function getWalletBalance(DatabaseContext contxt, int user_id, int ticket_id) returns decimal|error {
     sql:ParameterizedQuery query = `SELECT wallet_balance FROM users WHERE id = ${user_id}`;
 
     stream<WalletBalanceResult, error?> resultStream = contxt.dbClient->query(query);
@@ -183,8 +183,8 @@ public function getPaymentsByStatus(DatabaseContext ctx, string status) returns 
 }
 
 // Validation helpers
-public function validateSufficientFunds(DatabaseContext ctx, int user_id, decimal amount) returns boolean|error {
-    decimal currentBalance = check getWalletBalance(ctx, user_id);
+public function validateSufficientFunds(DatabaseContext ctx, int user_id, decimal amount,int ticket_id) returns boolean|error {
+    decimal currentBalance = check getWalletBalance(ctx, user_id,ticket_id);
     return currentBalance >= amount;
 }
 
@@ -196,13 +196,13 @@ public function processWalletPayment(DatabaseContext ctx, Payment payment) retur
         return error("User does not exist");
     }
     
-    boolean hasSufficientFunds = check validateSufficientFunds(ctx, payment.user_id, payment.amount);
+    boolean hasSufficientFunds = check validateSufficientFunds(ctx, payment.user_id, payment.amount, payment.ticket_id);
     if !hasSufficientFunds {
         return error("Insufficient wallet balance");
     }
     
     // Deduct amount from wallet
-    decimal currentBalance = check getWalletBalance(ctx, payment.user_id);
+    decimal currentBalance = check getWalletBalance(ctx, payment.user_id, payment.ticket_id);
     decimal newBalance = currentBalance - payment.amount;
     check updateWalletBalance(ctx, payment.user_id, newBalance);
     
@@ -218,7 +218,7 @@ public function processWalletPayment(DatabaseContext ctx, Payment payment) retur
     };
 }
 
-public function processWalletTopup(DatabaseContext ctx, int userId, decimal amount, string paymentReference) returns error? {
+public function processWalletTopup(DatabaseContext ctx, int userId, decimal amount, string paymentReference,int ticketId) returns error? {
     //Validate user exists
     boolean userExists = check validateUserExists(ctx, userId);
     if !userExists {
@@ -226,7 +226,7 @@ public function processWalletTopup(DatabaseContext ctx, int userId, decimal amou
     }
     
     //Add amount to wallet
-    decimal currentBalance = check getWalletBalance(ctx, userId);
+    decimal currentBalance = check getWalletBalance(ctx, userId,ticketId);
     decimal newBalance = currentBalance + amount;
     check updateWalletBalance(ctx, userId, newBalance);
 }
